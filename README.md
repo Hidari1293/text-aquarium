@@ -59,7 +59,10 @@
 
 ## 运行
 
-需要 Node.js 20+ 与 Rust 1.77+（MSVC 工具链）。
+**只想用，不想编译**：下载 `Text Aquarium_1.0.0_x64-setup.exe` 双击安装，
+开始菜单里就有 `Text Aquarium`。按当前用户安装，不需要管理员权限。
+
+**从源码跑**：需要 Node.js 20+ 与 Rust 1.77+（MSVC 工具链）。
 
 ```bash
 npm install
@@ -87,6 +90,9 @@ npx tauri build --debug --no-bundle
 
 （注意：直接 `cargo build` 出来的是 dev 版，它会去找 `devUrl` 上的开发服务器，
 没有服务器时是一块黑窗口。要用可执行文件就用上面这条。）
+
+`npm run dev` 会自己起一个只读静态服务器（`scripts/dev-server.mjs`，端口 5183），
+所以不需要另外开一个；如果 5183 被占用会报 `EADDRINUSE`，先关掉占用它的进程。
 
 无网络、无账号、无服务器。设置存在本机。
 
