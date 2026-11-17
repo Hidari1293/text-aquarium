@@ -69,10 +69,28 @@ def describe(hwnd):
     return f"'{buf.value}' pid={pid.value}"
 
 
-OCEAN = {"orange": (217, 139, 75), "blue": (91, 143, 185), "teal": (79, 163, 154)}
+# The fish colours adapt to the background (lightened on dark desktops,
+# darkened on bright ones), so a single RGB target would miss them. Match a
+# set of reference points along that adaptation line instead, with a tight
+# tolerance — tight enough that VSCode's syntax colours stay out.
+def _refs(base):
+    out = []
+    for k in (-0.2, 0, 0.15, 0.3, 0.45, 0.6):
+        if k >= 0:
+            out.append(tuple(round(c + (255 - c) * k) for c in base))
+        else:
+            out.append(tuple(round(c * (1 + k)) for c in base))
+    return out
 
 
-def find_fish_fast(img, tol=16, min_px=60, shape=True):
+OCEAN_REFS = {
+    "orange": _refs((232, 130, 60)),
+    "blue": _refs((62, 140, 220)),
+    "teal": _refs((44, 168, 148)),
+}
+
+
+def find_fish_fast(img, tol=16, min_px=100, shape=True):
     """Coloured clusters that look like a fish glyph, in image pixels.
 
     Vectorised, because the caller runs this on a 2560x1600 grab and a pure
@@ -86,8 +104,10 @@ def find_fish_fast(img, tol=16, min_px=60, shape=True):
 
     a = np.asarray(img.convert("RGB"), dtype=np.int16)
     raw = []
-    for name, target in OCEAN.items():
-        mask = (np.abs(a - np.array(target, dtype=np.int16)) <= tol).all(axis=2)
+    for name, refs in OCEAN_REFS.items():
+        mask = np.zeros(a.shape[:2], dtype=bool)
+        for target in refs:
+            mask |= (np.abs(a - np.array(target, dtype=np.int16)) <= tol).all(axis=2)
         ys, xs = np.nonzero(mask)
         if len(xs) == 0:
             continue

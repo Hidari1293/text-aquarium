@@ -37,6 +37,18 @@ const el = {
   setSeaweed: document.getElementById("set-seaweed"),
   setBubbles: document.getElementById("set-bubbles"),
   setFps: document.getElementById("set-fps"),
+  setCount: document.getElementById("set-count"),
+  setCountVal: document.getElementById("set-count-val"),
+  setSize: document.getElementById("set-size"),
+  setSizeVal: document.getElementById("set-size-val"),
+  setLiveliness: document.getElementById("set-liveliness"),
+  setLivelinessVal: document.getElementById("set-liveliness-val"),
+  customInput: document.getElementById("set-custom"),
+  btnCustomAdd: document.getElementById("btn-custom-add"),
+  btnCustomDir: document.getElementById("btn-custom-dir"),
+  btnCustomRemove: document.getElementById("btn-custom-remove"),
+  customLive: document.getElementById("custom-live"),
+  customGlyphOut: document.getElementById("custom-glyph"),
   btnTech: document.getElementById("btn-tech"),
   techOut: document.getElementById("tech-out"),
   statusMode: document.getElementById("status-mode"),
@@ -64,6 +76,7 @@ const state = {
   fpsEma: 0,
   fpsStamp: 0,
   statusStamp: 0,
+  work: null, // work-area origin + scale, filled by syncPlacement
 };
 
 /* ------------------------------------------------------------------ loop */
@@ -92,7 +105,7 @@ function frame(ts) {
   state.renderer.render(state.sim);
 
   if (state.stage !== BOUNDARY.CLOSED) {
-    state.layer.frame(ts, state.sim.snapshot());
+    state.layer.frame(ts, state.sim.snapshot(), state.sim.fishSize);
     if (state.stage === BOUNDARY.RETURNING && state.sim.counts().desk === 0) {
       finishReturn();
     }
@@ -155,12 +168,22 @@ async function syncPlacement() {
   placementBusy = true;
   try {
     const tauri = state.layer.tauri;
+    // a minimised window reports a junk position (-32000, -32000): syncing
+    // now would point every returning fish at a clamped desk corner. Keep
+    // the last honest rect instead.
+    try {
+      const win = tauri.window.getCurrentWindow();
+      if (win && (await win.isMinimized())) return;
+    } catch {
+      /* older API surface: carry on with the measurement */
+    }
     const [tank, work] = await Promise.all([
       tauri.core.invoke("tank_placement"),
       tauri.core.invoke("work_area"),
     ]);
     const scale = tank.scale || work.scale || 1;
     const canvas = el.canvas.getBoundingClientRect();
+    state.work = { x: work.x, y: work.y, scale };
     state.sim.setDesk(work.width / scale, work.height / scale);
     state.sim.setTankRect(tankRectInDesk({ ...tank, scale }, { x: work.x, y: work.y }, canvas));
   } catch (error) {
@@ -170,12 +193,94 @@ async function syncPlacement() {
   }
 }
 
+/* ---------------------------------------------------------------- cursor */
+
+/**
+ * Where the mouse is, per space. The tank sees its own cursor through real
+ * pointer events; the desk cursor is polled through Rust while the boundary
+ * is open (10 Hz is plenty for a fish to notice). Both feed the simulation,
+ * which turns a near cursor into a dart and a long-idle one into a curiosity.
+ */
+function trackTankCursor(event) {
+  const rect = el.canvas.getBoundingClientRect();
+  state.sim.setCursor("tank", event.clientX - rect.left, event.clientY - rect.top);
+}
+
+function untrackTankCursor() {
+  state.sim.clearCursor("tank");
+}
+
+let cursorTimer = 0;
+let bgTick = 0;
+
+function pollDeskCursor() {
+  if (
+    state.paused ||
+    state.stage === BOUNDARY.CLOSED ||
+    !state.layer.available ||
+    !state.work
+  ) {
+    cursorTimer = 0;
+    return;
+  }
+  const tauri = state.layer.tauri;
+  tauri.core
+    .invoke("cursor_pos")
+    .then((point) => {
+      if (!point) return;
+      state.sim.setCursor(
+        "desk",
+        (point[0] - state.work.x) / state.work.scale,
+        (point[1] - state.work.y) / state.work.scale
+      );
+    })
+    .catch(() => {});
+  // every 4th tick (~400ms) sample what one desk fish is swimming over, so
+  // its colour adapts to the wallpaper beneath it
+  if (bgTick++ % 4 === 0) sampleFishBackground();
+  cursorTimer = setTimeout(pollDeskCursor, 100);
+}
+
+/** One screen pixel behind one desk fish, round-robin across the school. */
+function sampleFishBackground() {
+  const desk = state.sim.fish.filter((f) => f.space === "desk");
+  if (desk.length === 0) return;
+  const fish = desk[bgTick % desk.length];
+  const px = Math.round(fish.x * state.work.scale + state.work.x);
+  const py = Math.round(fish.y * state.work.scale + state.work.y);
+  state.layer.tauri.core
+    .invoke("screen_pixel", { x: px, y: py })
+    .then((c) => {
+      if (!c) return;
+      const lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+      state.sim.noteBackground(fish.id, lum);
+    })
+    .catch(() => {});
+}
+
+function startCursorPolling() {
+  if (cursorTimer) return;
+  cursorTimer = setTimeout(pollDeskCursor, 0);
+}
+
+function stopCursorPolling() {
+  if (cursorTimer) clearTimeout(cursorTimer);
+  cursorTimer = 0;
+  state.sim.clearCursor("desk");
+}
+
 /* ---------------------------------------------------------------- status */
 
 function note(text, ms = 2400) {
   state.note = text;
   state.noteUntil = performance.now() + ms;
   refreshStatus();
+}
+
+function livelinessLabel(value) {
+  if (value <= 0.6) return "安静";
+  if (value >= 1.6) return "闹腾";
+  return "普通";
 }
 
 function refreshStatus() {
@@ -221,8 +326,10 @@ function setPaused(paused) {
 
   if (paused) {
     stopLoop();
+    stopCursorPolling();
   } else if (!document.hidden) {
     startLoop();
+    if (state.stage !== BOUNDARY.CLOSED) startCursorPolling();
   }
 }
 
@@ -231,11 +338,35 @@ function setSettings(patch) {
   saveSettings(state.settings);
   state.sim.bubbles.enabled = state.settings.bubbles;
   state.sim.seaweed.enabled = state.settings.seaweed;
+  applyFishSettings();
+  refreshCustomRow();
   if (!state.paused && !document.hidden) {
     stopLoop();
     startLoop();
   }
   state.renderer.render(state.sim);
+}
+
+/** Count / size / liveliness / custom fish reach the school via the sim. */
+function applyFishSettings() {
+  const sim = state.sim;
+  sim.setFishCount(state.settings.count);
+  sim.setFishSize(state.settings.size);
+  sim.setLiveliness(state.settings.liveliness);
+  sim.setCustomFish(state.settings.customGlyph || "", state.settings.customFacing ?? 1);
+  sim.syncMetrics((glyph) => state.renderer.measure(glyph, sim.fishSize));
+}
+
+/** The custom-fish row mirrors the setting (and the fish in the tank). */
+function refreshCustomRow() {
+  const glyph = (state.settings.customGlyph || "").trim();
+  const has = Boolean(glyph && state.sim.customFish);
+  el.customLive.hidden = !has;
+  if (has) {
+    el.customGlyphOut.textContent = glyph;
+    el.btnCustomDir.textContent =
+      (state.settings.customFacing ?? 1) >= 0 ? "头朝右" : "头朝左";
+  }
 }
 
 function togglePanel(open) {
@@ -302,6 +433,7 @@ async function openBoundary() {
 
     state.sim.openBoundary();
     setStage(BOUNDARY.OPEN);
+    startCursorPolling();
   } finally {
     opening = false;
   }
@@ -317,6 +449,7 @@ function beginReturn() {
 async function finishReturn() {
   if (state.stage !== BOUNDARY.RETURNING) return;
   setStage(BOUNDARY.CLOSED);
+  stopCursorPolling();
   try {
     await state.layer.hide();
   } catch (error) {
@@ -347,8 +480,9 @@ function setHunt(on) {
   state.hunt = next;
   el.btnHunt.setAttribute("aria-pressed", String(next));
   state.layer.setHunt(next);
+  state.sim.setHunting(next);
   refreshStatus();
-  if (next) note("捞鱼模式：鼠标靠近小鱼时才会接住点击");
+  if (next) note("捞鱼模式：按住拖动框住小鱼，它们就会游回鱼缸");
 }
 
 /* ----------------------------------------------------------- phase 0 UI */
@@ -387,8 +521,11 @@ function testProbe() {
   const tauri = window.__TAURI__;
   const fish = state.sim.fish.map((f) => ({
     id: f.id,
+    glyph: f.glyph,
+    canonFacing: f.canonFacing,
     space: f.space,
     state: f.state,
+    mood: f.mood,
     x: Math.round(f.x * 100) / 100,
     y: Math.round(f.y * 100) / 100,
     heading: Math.round(f.heading * 1000) / 1000,
@@ -399,6 +536,9 @@ function testProbe() {
     wave: Math.round(f.wavePhase * 100) / 100,
     pitch: Math.round(f.pitch * 100) / 100,
     amp: f.waveAmp,
+    goal: f.goal
+      ? { x: Math.round(f.goal.x * 10) / 10, y: Math.round(f.goal.y * 10) / 10 }
+      : null,
   }));
   return tauri.core
     .invoke("debug_windows")
@@ -410,9 +550,17 @@ function testProbe() {
           hunt: state.hunt,
           paused: state.paused,
           counts: state.sim.counts(),
+          fishCount: state.sim.fishCount,
+          fishSize: state.sim.fishSize,
+          liveliness: state.sim.liveliness,
           placementValid: state.sim.placementValid,
           tankRect: state.sim.tankRect,
           desk: state.sim.desk,
+          cursor: {
+            tank: state.sim._cursor.tank,
+            desk: state.sim._cursor.desk,
+            idle: state.sim.time - state.sim._cursor.lastMove,
+          },
           fish,
           windows,
           fps: Math.round(state.fpsEma),
@@ -420,6 +568,38 @@ function testProbe() {
         }),
       })
     );
+}
+
+/**
+ * Dev-only cursor control, so tests are deterministic without touching the
+ * real mouse: __cursor("tank"|"desk", x, y) places it and holds it there
+ * (the real-mouse polling is ignored until __cursor("on")),
+ * __cursor("idle", s) ages it, __cursor("off") clears and freezes.
+ */
+function testCursor(kind, x, y) {
+  const sim = state.sim;
+  if (kind === "off") {
+    sim.clearCursor("tank");
+    sim.clearCursor("desk");
+    sim.setCursorLock(true);
+    return "locked";
+  }
+  if (kind === "on") {
+    sim.setCursorLock(false);
+    return "unlocked";
+  }
+  if (kind === "idle") {
+    sim._cursor.lastMove = sim.time - (Number(x) || 100);
+    return `idle ${Number(x) || 100}s`;
+  }
+  const c = sim._cursor[kind];
+  if (!c) return "unknown space";
+  c.x = x;
+  c.y = y;
+  c.active = true;
+  sim._cursor.lastMove = sim.time;
+  sim.setCursorLock(true); // the synthetic cursor stays until released
+  return "set";
 }
 
 function testShot(name = "tank") {
@@ -439,21 +619,27 @@ async function init() {
   el.setSeaweed.checked = state.settings.seaweed;
   el.setBubbles.checked = state.settings.bubbles;
   el.setFps.checked = state.settings.highFps;
+  el.setCount.value = state.settings.count;
+  el.setCountVal.textContent = String(state.settings.count);
+  el.setSize.value = state.settings.size;
+  el.setSizeVal.textContent = `${state.settings.size}px`;
+  el.setLiveliness.value = state.settings.liveliness;
+  el.setLivelinessVal.textContent = livelinessLabel(state.settings.liveliness);
   state.sim.bubbles.enabled = state.settings.bubbles;
   state.sim.seaweed.enabled = state.settings.seaweed;
+  state.sim.fishCount = state.settings.count;
 
   relayout();
   setStage(BOUNDARY.CLOSED);
+  applyFishSettings();
+  refreshCustomRow();
 
-  state.layer.onGrab = (id) => {
-    if (!state.sim.grabFish(id)) return;
-    note("抓住了");
+  state.layer.onLasso = (x1, y1, x2, y2) => {
+    const caught = state.sim.lassoFish(x1, y1, x2, y2);
+    if (caught > 0) note(`网住了 ${caught} 条，它们正在游回鱼缸`);
   };
-  state.layer.onDrag = (id, x, y) => state.sim.dragFish(id, x, y);
-  state.layer.onDrop = (id, x, y) => {
-    const where = state.sim.dropFish(id, x, y);
-    if (where === "tank") note("放回鱼缸了");
-    else if (where) note("放回桌面");
+  state.layer.onHuntOff = () => {
+    if (state.hunt) setHunt(false);
   };
 
   new ResizeObserver(relayout).observe(el.tank);
@@ -473,6 +659,37 @@ async function init() {
   el.setFps.addEventListener("change", () =>
     setSettings({ highFps: el.setFps.checked })
   );
+  el.setCount.addEventListener("input", () => {
+    el.setCountVal.textContent = el.setCount.value;
+    setSettings({ count: Number(el.setCount.value) });
+  });
+  el.setSize.addEventListener("input", () => {
+    el.setSizeVal.textContent = `${el.setSize.value}px`;
+    setSettings({ size: Number(el.setSize.value) });
+  });
+  el.setLiveliness.addEventListener("input", () => {
+    const value = Number(el.setLiveliness.value);
+    el.setLivelinessVal.textContent = livelinessLabel(value);
+    setSettings({ liveliness: value });
+  });
+  el.btnCustomAdd.addEventListener("click", () => {
+    const text = el.customInput.value.trim();
+    if (!text) return;
+    setSettings({ customGlyph: text });
+    el.customInput.value = "";
+    note(`来了一条新鱼 ${text}`);
+  });
+  el.btnCustomDir.addEventListener("click", () =>
+    setSettings({ customFacing: (state.settings.customFacing ?? 1) >= 0 ? -1 : 1 })
+  );
+  el.btnCustomRemove.addEventListener("click", () => {
+    el.customInput.value = "";
+    setSettings({ customGlyph: "" });
+  });
+
+  // the tank cursor is real pointer events; the desk cursor is polled
+  el.canvas.addEventListener("pointermove", trackTankCursor);
+  el.canvas.addEventListener("pointerleave", untrackTankCursor);
 
   document.addEventListener("keydown", (event) => {
     if (event.code === "Space") {
@@ -492,9 +709,14 @@ async function init() {
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) stopLoop();
-    else if (!state.paused) {
+    if (document.hidden) {
+      // a minimised tank with the boundary open is still a desktop pet: the
+      // fish outside keep swimming (and keep reacting to the cursor) — only
+      // a tank with nothing to show anywhere is allowed to sleep
+      if (state.stage === BOUNDARY.CLOSED) stopLoop();
+    } else if (!state.paused) {
       startLoop();
+      if (state.stage !== BOUNDARY.CLOSED) startCursorPolling();
       queuePlacement();
     }
   });
@@ -515,7 +737,7 @@ async function init() {
   });
 
   startLoop();
-  installTestHooks("tank", { probe: testProbe, shot: testShot });
+  installTestHooks("tank", { probe: testProbe, shot: testShot, cursor: testCursor });
 }
 
 init();

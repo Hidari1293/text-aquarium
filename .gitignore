@@ -21,3 +21,7 @@ Thumbs.db
 
 # 本机工作区数据（会话记忆、缓存）
 .workbuddy/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc

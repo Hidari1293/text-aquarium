@@ -76,6 +76,17 @@ def checkbox(drive, element_id):
         return handle.read().strip() == "true"
 
 
+def slider(drive, element_id, value):
+    """Set a range input the way the UI does: value + input event."""
+    drive.run(
+        "const e = document.getElementById("
+        + json.dumps(element_id)
+        + "); e.value = "
+        + json.dumps(str(value))
+        + "; e.dispatchEvent(new Event('input'));"
+    )
+
+
 def start():
     """Launch and wait until the page answers."""
     D.launch()
@@ -109,6 +120,7 @@ def part_one():
 
     check("defaults are in memory", state["settings"]["bubbles"] is True, str(state["settings"]))
     check("the checkbox starts ticked", checkbox(tank, "set-bubbles") is True)
+    check("five fish is the default school", state["fishCount"] == 5, str(state["fishCount"]))
     check("no file is written before anything changes", not os.path.exists(SETTINGS), SETTINGS)
 
     tank.click("set-bubbles")
@@ -137,9 +149,31 @@ def part_one():
     check("and it can be switched back", restored.get("bubbles") is True, json.dumps(restored))
     check(
         "the file holds every documented key",
-        set(restored) == {"seaweed", "bubbles", "highFps"},
+        set(restored)
+        == {"seaweed", "bubbles", "highFps", "count", "size", "liveliness", "customGlyph", "customFacing"},
         json.dumps(restored),
     )
+
+    # the school size slider round-trips too: 5 -> 6 fish, restart, count
+    slider(tank, "set-count", 6)
+    time.sleep(1.2)
+    saved = read_settings() or {}
+    check("growing the school writes the file", saved.get("count") == 6, json.dumps(saved))
+    check("and the school follows at once", tank.probe()["fishCount"] == 6, str(tank.probe()["fishCount"]))
+
+    D.kill()
+    time.sleep(1.0)
+    try:
+        tank, state = start()
+    except TimeoutError as err:
+        check("restart after the slider", False, str(err))
+        return
+    check("a restart remembers six fish", state["fishCount"] == 6, str(state["fishCount"]))
+    check("all six are inside", state["counts"]["tank"] == 6, str(state["counts"]))
+
+    slider(tank, "set-count", 5)
+    time.sleep(1.0)
+    check("and it can be set back", (read_settings() or {}).get("count") == 5)
     D.kill()
     time.sleep(0.8)
 

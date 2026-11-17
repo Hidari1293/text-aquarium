@@ -1,6 +1,6 @@
 [package]
 name = "text-aquarium"
-version = "1.0.0"
+version = "1.2.1"
 description = "Text Aquarium - a tiny text-character fish tank that can leak onto your desktop"
 authors = ["Text Aquarium"]
 edition = "2021"

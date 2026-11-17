@@ -2,14 +2,14 @@
 //
 // It owns no fish state. The tank window is the single brain: it pushes a
 // snapshot of every fish that is currently *outside* the tank, in desk
-// coordinates, and this page only draws them (and handles the mouse while
-// catching mode is on).
+// coordinates, and this page only draws them.
 //
 // Input policy (the brief's hard requirement): the layer must never sit on top
 // of other software and eat its clicks. It is created click-through and stays
-// that way; while catching mode is on we poll the cursor and only become
-// hittable when the cursor is actually within a fish's glyph box. Everything
-// else on the screen keeps working.
+// that way — with one deliberate exception: while catching mode is on, the
+// user has taken the net out, so the layer owns the mouse for the duration of
+// the hunt. Dragging then draws a box; the fish inside it swim home. Esc or a
+// right click puts the net away (and the layer goes back to click-through).
 //
 // Drawing policy: only the rectangles that held ink last frame and the ones
 // that hold ink now are cleared, and the animation loop stops completely when
@@ -22,9 +22,6 @@ import { installTestHooks } from "./test-hooks.js";
 
 const FONT_STACK =
   'ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", "DejaVu Sans Mono", monospace';
-const CURSOR_HZ = 55; // ms between cursor probes while catching
-/** Half the glyph box, plus room for the ripple and the lean. */
-const HALF_H = 13;
 
 const tauri = window.__TAURI__;
 const canvas = document.getElementById("overlay-canvas");
@@ -34,41 +31,43 @@ let width = 0;
 let height = 0;
 let dpr = 1;
 
-/** Latest snapshot from the tank: [{ id, g, x, y, f, m, c, w, p, a }]. */
+/** Latest snapshot from the tank: { seq, fish: [...], size }. */
 let fish = [];
+let size = FISH_SIZE;
 let dirty = true;
 let rafId = 0;
 /** Rects painted last frame, so only they need clearing. */
 let painted = [];
+/** The UI chrome (hint / lasso box) footprint, cleared the same way. */
+let chromeRect = null;
 
 /** Overlay client origin in desk space (normally 0,0; measured, not assumed). */
 let deskOffset = { x: 0, y: 0 };
-/** Overlay client origin in physical pixels, for cursor maths. */
 let innerPos = { x: 0, y: 0 };
 let scale = 1;
 
 let hunting = false;
 let hittable = false;
-let hoverId = null;
+/** The lasso being dragged, in client coordinates; null when idle. */
+let lasso = null;
 
-let dragId = null;
-let dragPos = null;
-let dragSent = 0;
+const runs = new Map(); // "glyph@size" -> GlyphRun
 
-let pollTimer = 0;
-let workArea = null;
-
-const runs = new Map(); // glyph -> GlyphRun
-
-function run(glyph) {
-  let r = runs.get(glyph);
+function run(glyph, cf) {
+  const key = `${glyph}@${size}@${cf ?? "auto"}`;
+  let r = runs.get(key);
   if (r === undefined) {
-    ctx.font = `${FISH_SIZE}px ${FONT_STACK}`;
-    r = new GlyphRun(glyph);
+    ctx.font = `${size}px ${FONT_STACK}`;
+    r = new GlyphRun(glyph, cf);
     r.measure(ctx);
-    runs.set(glyph, r);
+    runs.set(key, r);
   }
   return r;
+}
+
+/** Half the glyph's vertical reach, for paint rects and the lasso pad. */
+function halfH() {
+  return size * 0.55 + 4;
 }
 
 /* ------------------------------------------------------------- geometry */
@@ -87,6 +86,7 @@ function resizeCanvas() {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   painted = [];
+  chromeRect = null;
   dirty = true;
 }
 
@@ -96,12 +96,12 @@ async function measureOrigin() {
     const win = tauri.window.getCurrentWindow();
     const pos = await win.innerPosition();
     const factor = await win.scaleFactor();
-    if (!workArea) workArea = await tauri.core.invoke("work_area");
+    const work = await tauri.core.invoke("work_area");
     innerPos = { x: pos.x, y: pos.y };
     scale = factor || 1;
     deskOffset = {
-      x: (innerPos.x - workArea.x) / scale,
-      y: (innerPos.y - workArea.y) / scale,
+      x: (innerPos.x - work.x) / scale,
+      y: (innerPos.y - work.y) / scale,
     };
   } catch (error) {
     console.error("[overlay] cannot measure origin", error);
@@ -110,19 +110,13 @@ async function measureOrigin() {
 
 /* ------------------------------------------------------------ rendering */
 
-/** Where a fish sits this frame: the hand wins while it is being held. */
-function spotOf(f) {
-  if (f.id === dragId && dragPos) return dragPos;
-  return { x: f.x - deskOffset.x, y: f.y - deskOffset.y };
-}
-
 function rectOf(x, y, w) {
   const padX = 8;
   return {
     x: Math.floor(x - w / 2 - padX),
-    y: Math.floor(y - HALF_H - 4),
+    y: Math.floor(y - halfH() - 4),
     w: Math.ceil(w + padX * 2),
-    h: HALF_H * 2 + 20,
+    h: Math.ceil(halfH() * 2 + 20),
   };
 }
 
@@ -136,7 +130,7 @@ function draw() {
   if (!dirty) return;
   dirty = false;
 
-  ctx.font = `${FISH_SIZE}px ${FONT_STACK}`;
+  ctx.font = `${size}px ${FONT_STACK}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
@@ -144,7 +138,7 @@ function draw() {
   const next = [];
   for (let i = 0; i < fish.length; i++) {
     const f = fish[i];
-    const pos = spotOf(f);
+    const pos = { x: f.x - deskOffset.x, y: f.y - deskOffset.y };
     if (
       pos.x < -140 ||
       pos.y < -60 ||
@@ -161,6 +155,10 @@ function draw() {
     const r = painted[i];
     ctx.clearRect(r.x, r.y, r.w, r.h);
   }
+  if (chromeRect) {
+    ctx.clearRect(chromeRect.x, chromeRect.y, chromeRect.w, chromeRect.h);
+    chromeRect = null;
+  }
   for (let i = 0; i < next.length; i++) {
     const r = next[i].rect;
     ctx.clearRect(r.x, r.y, r.w, r.h);
@@ -168,52 +166,79 @@ function draw() {
   painted = next.map((item) => item.rect);
 
   // 2. ink
+  const tiltPx = 5.5 * (size / 15);
   for (let i = 0; i < next.length; i++) {
     const { f, x, y } = next[i];
-    const r = run(f.g);
-    r.layout(f.f, f.w, f.a, f.p);
+    const r = run(f.g, f.cf);
+    r.layout(f.f, f.w, f.a, f.p, tiltPx);
 
-    ctx.fillStyle = blend(f.c, f.m);
-    const { chars, dx, dy, n } = r;
-    for (let k = 0; k < n; k++) ctx.fillText(chars[k], x + dx[k], y + dy[k]);
+    ctx.fillStyle = blend(f.c, f.m, f.i);
+    const { drawChars, dx, dy, n } = r;
+    for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k], y + dy[k]);
 
-    if (f.id === dragId) drawBrackets(x, y, r.width, f.c);
-    else if (f.id === hoverId) drawPerch(x, y, r.width, f.c);
+    // Coloured fish read bolder and fatter: as the colour comes in, a bold
+    // pass fades in over the regular one, plus four nudged copies that give
+    // the glyph real thickness — so the weight follows the colour instead of
+    // popping, and a fish going home is plain ink again by the time the tank
+    // canvas takes over.
+    if (f.m > 0.01) {
+      ctx.globalAlpha = f.m;
+      ctx.font = `bold ${size}px ${FONT_STACK}`;
+      for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k], y + dy[k]);
+      ctx.globalAlpha = f.m * 0.55;
+      for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k] + 0.6, y + dy[k]);
+      for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k] - 0.6, y + dy[k]);
+      for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k], y + dy[k] + 0.55);
+      for (let k = 0; k < n; k++) ctx.fillText(drawChars[k], x + dx[k], y + dy[k] - 0.55);
+      ctx.globalAlpha = 1;
+      ctx.font = `${size}px ${FONT_STACK}`;
+    }
+  }
+
+  // 3. net UI: the lasso box while dragging, a hint while hunting
+  if (hunting) {
+    if (lasso) {
+      chromeRect = drawLasso();
+    } else {
+      chromeRect = drawHint();
+    }
   }
 }
 
-/** Held: a pair of brackets, the lightest possible "this one" marker. */
-function drawBrackets(x, y, w, color) {
-  const pad = w / 2 + 7;
-  ctx.fillStyle = blend(color, 0.85);
-  ctx.fillText("[", x - pad, y);
-  ctx.fillText("]", x + pad, y);
+/** The selection box: a white band with a black edge, visible on any desktop. */
+function drawLasso() {
+  const x = Math.min(lasso.x1, lasso.x2);
+  const y = Math.min(lasso.y1, lasso.y2);
+  const w = Math.abs(lasso.x2 - lasso.x1);
+  const h = Math.abs(lasso.y2 - lasso.y1);
+  ctx.strokeStyle = "rgba(255,255,255,0.95)";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.strokeStyle = "rgba(17,17,17,0.9)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  return { x: x - 4, y: y - 4, w: w + 8, h: h + 8 };
 }
 
-/** Hovered: a dotted perch underneath, like a fish casting a shadow. */
-function drawPerch(x, y, w, color) {
-  const pad = Math.min(w / 2, 26);
-  ctx.fillStyle = blend(color, 0.45);
-  for (let i = -2; i <= 2; i++) {
-    ctx.fillText("·", x + (i * pad) / 2.4, y + HALF_H + 3);
-  }
+/** One line of help so the hunt needs no manual. */
+function drawHint() {
+  const text = "按住拖动，框住小鱼就会游回鱼缸 · Esc 或右键收起渔网";
+  ctx.font = `${size}px ${FONT_STACK}`;
+  const w = ctx.measureText(text).width + 28;
+  const h = size + 12;
+  const x = Math.round(width / 2 - w / 2);
+  const y = Math.round(height - h - 18);
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "rgba(17,17,17,0.55)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.fillStyle = "rgba(17,17,17,0.9)";
+  ctx.fillText(text, width / 2, y + h / 2 + 1);
+  return { x: x - 3, y: y - 3, w: w + 6, h: h + 6 };
 }
 
 /* --------------------------------------------------------------- input */
-
-function fishAt(cx, cy, pad = 10) {
-  for (let i = fish.length - 1; i >= 0; i--) {
-    const f = fish[i];
-    const pos = spotOf(f);
-    if (
-      Math.abs(cx - pos.x) <= run(f.g).halfW + pad &&
-      Math.abs(cy - pos.y) <= HALF_H + pad
-    ) {
-      return f;
-    }
-  }
-  return null;
-}
 
 async function setHittable(next) {
   if (hittable === next) return;
@@ -226,128 +251,84 @@ async function setHittable(next) {
   }
 }
 
-async function pollCursor() {
+/** Esc / right click / leaving the window: put the net away. */
+function exitHunt() {
   if (!hunting) return;
-  try {
-    // while a fish is in hand the layer must keep receiving the pointer,
-    // wherever it goes
-    if (dragId) {
-      await setHittable(true);
-    } else {
-      const point = await tauri.core.invoke("cursor_pos");
-      if (point) {
-        const cx = (point[0] - innerPos.x) / scale;
-        const cy = (point[1] - innerPos.y) / scale;
-        await setHittable(fishAt(cx, cy, 14) !== null);
-      } else {
-        await setHittable(false);
-      }
-    }
-  } catch (error) {
-    // a failed probe must not leave the layer eating clicks
-    if (!dragId) await setHittable(false);
-  }
-  if (hunting) pollTimer = setTimeout(pollCursor, CURSOR_HZ);
-}
-
-function startPolling() {
-  if (pollTimer) return;
-  pollTimer = setTimeout(pollCursor, 0);
-}
-
-function stopPolling() {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = 0;
-  if (hittable && !dragId) setHittable(false);
+  setHunting(false);
+  if (tauri) tauri.event.emit("overlay-hunt-off", null).catch(() => {});
 }
 
 async function setHunting(next) {
   if (hunting === next) return;
   hunting = next;
   document.body.classList.toggle("hunting", next);
+  lasso = null;
   if (next) {
-    startPolling();
+    await setHittable(true); // the net is out: the layer owns the mouse
   } else {
-    stopPolling();
-    hoverId = null;
-    endDrag(true);
-    schedule();
+    await setHittable(false);
   }
+  schedule();
 }
 
-function emitDrag(kind, x, y) {
-  if (!tauri) return;
+function emitLasso(clientRect) {
+  // a stray click still counts as a tiny net: expand it so tapping a fish
+  // catches it, like the old grab used to
+  const min = 16;
+  let x1 = Math.min(clientRect.x1, clientRect.x2);
+  let y1 = Math.min(clientRect.y1, clientRect.y2);
+  let x2 = Math.max(clientRect.x1, clientRect.x2);
+  let y2 = Math.max(clientRect.y1, clientRect.y2);
+  if (x2 - x1 < min) {
+    const cx = (x1 + x2) / 2;
+    x1 = cx - min / 2;
+    x2 = cx + min / 2;
+  }
+  if (y2 - y1 < min) {
+    const cy = (y1 + y2) / 2;
+    y1 = cy - min / 2;
+    y2 = cy + min / 2;
+  }
   tauri.event
-    .emit(kind, { id: dragId, x: x + deskOffset.x, y: y + deskOffset.y })
+    .emit("overlay-lasso", {
+      x1: x1 + deskOffset.x,
+      y1: y1 + deskOffset.y,
+      x2: x2 + deskOffset.x,
+      y2: y2 + deskOffset.y,
+    })
     .catch(() => {});
-}
-
-function onPointerMove(event) {
-  if (!hunting) return;
-  if (dragId) {
-    dragPos = { x: event.clientX, y: event.clientY };
-    const now = performance.now();
-    // the simulation only needs the position at its own frame rate
-    if (now - dragSent > 16) {
-      dragSent = now;
-      emitDrag("overlay-drag", dragPos.x, dragPos.y);
-    }
-    schedule();
-    return;
-  }
-  const hit = fishAt(event.clientX, event.clientY, 10);
-  const id = hit ? hit.id : null;
-  if (id !== hoverId) {
-    hoverId = id;
-    schedule();
-  }
 }
 
 function onPointerDown(event) {
   if (!hunting) return;
-  const hit = fishAt(event.clientX, event.clientY, 10);
-  if (!hit) {
-    // clicked empty water: put the net away so the click passes through next time
-    setHittable(false);
+  if (event.button === 2) {
+    // right click: put the net away
+    exitHunt();
     return;
   }
-  dragId = hit.id;
-  dragPos = { x: event.clientX, y: event.clientY };
-  dragSent = 0;
-  hoverId = hit.id;
-  document.body.classList.add("is-dragging");
-  emitDrag("overlay-grab", dragPos.x, dragPos.y);
+  if (event.button !== 0) return;
+  lasso = { x1: event.clientX, y1: event.clientY, x2: event.clientX, y2: event.clientY };
+  schedule();
+}
+
+function onPointerMove(event) {
+  if (!hunting || !lasso) return;
+  lasso.x2 = event.clientX;
+  lasso.y2 = event.clientY;
   schedule();
 }
 
 function onPointerUp(event) {
-  if (!dragId) return;
-  const x = dragPos ? dragPos.x : event.clientX;
-  const y = dragPos ? dragPos.y : event.clientY;
-  const id = dragId;
-  // tell the tank where the fish was let go *before* clearing the local one,
-  // so the snapshot that comes back is already the right one
-  emitDrag("overlay-drop", x, y);
-  dragId = null;
-  dragPos = null;
-  document.body.classList.remove("is-dragging");
-  const stillThere = fish.find((f) => f.id === id);
-  if (stillThere) {
-    const pos = { x: stillThere.x - deskOffset.x, y: stillThere.y - deskOffset.y };
-    hoverId = fishAt(pos.x, pos.y, 10) ? id : null;
-  } else {
-    hoverId = null;
-  }
+  if (!hunting || !lasso) return;
+  const box = lasso;
+  lasso = null;
+  emitLasso(box);
   schedule();
 }
 
-/** Dropped without a pointerup: catching mode off, window hidden, etc. */
-function endDrag(tell) {
-  if (!dragId) return;
-  if (tell && dragPos) emitDrag("overlay-drop", dragPos.x, dragPos.y);
-  dragId = null;
-  dragPos = null;
-  document.body.classList.remove("is-dragging");
+function onPointerCancel() {
+  if (!lasso) return;
+  lasso = null;
   schedule();
 }
 
@@ -359,10 +340,11 @@ function testProbe() {
     text: JSON.stringify({
       hunting,
       hittable,
-      dragId,
+      lasso: lasso !== null,
+      size,
       fish,
       deskOffset,
-      size: [width, height],
+      sizePx: [width, height],
       rafRunning: Boolean(rafId),
     }),
   });
@@ -379,10 +361,11 @@ function testShot(name = "overlay") {
 }
 
 /** Drive the pointer handlers with client coordinates. */
-function testPointer(kind, x, y) {
-  if (kind === "down") onPointerDown({ clientX: x, clientY: y });
+function testPointer(kind, x, y, button = 0) {
+  if (kind === "down") onPointerDown({ clientX: x, clientY: y, button });
   else if (kind === "move") onPointerMove({ clientX: x, clientY: y });
-  else onPointerUp({ clientX: x, clientY: y });
+  else if (kind === "up") onPointerUp({ clientX: x, clientY: y });
+  else if (kind === "cancel") onPointerCancel();
 }
 
 async function boot() {
@@ -391,8 +374,9 @@ async function boot() {
   resizeCanvas();
 
   await tauri.event.listen("tank-frame", (event) => {
-    fish = event.payload.fish || [];
-    if (hunting && fish.length === 0) hoverId = null;
+    const payload = event.payload || {};
+    fish = payload.fish || [];
+    size = payload.size || FISH_SIZE;
     schedule();
   });
 
@@ -407,8 +391,13 @@ async function boot() {
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerdown", onPointerDown);
   window.addEventListener("pointerup", onPointerUp);
-  window.addEventListener("pointercancel", () => endDrag(true));
-  window.addEventListener("blur", () => endDrag(true));
+  window.addEventListener("pointercancel", onPointerCancel);
+  window.addEventListener("contextmenu", (event) => event.preventDefault());
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") exitHunt();
+  });
+  // a window the user left behind should not keep the whole screen hostage
+  window.addEventListener("blur", exitHunt);
   window.addEventListener("resize", async () => {
     resizeCanvas();
     await measureOrigin();
@@ -419,11 +408,11 @@ async function boot() {
     if (document.hidden) {
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
-      stopPolling();
+      exitHunt();
     } else {
       // a window that was created hidden never ran a frame: restart cleanly
       painted = [];
-      if (hunting) startPolling();
+      chromeRect = null;
       schedule();
     }
   });

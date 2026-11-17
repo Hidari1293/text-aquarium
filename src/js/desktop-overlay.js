@@ -7,11 +7,10 @@
 //
 //   * the layer is created when the boundary opens and destroyed when the last
 //     fish is home — a hidden WebView2 keeps a renderer alive for nothing
-//   * clicks pass through unless catching mode is on, and even then the layer
-//     only becomes hittable near a fish (decided inside the layer page)
+//   * clicks pass through unless catching mode is on; the hunt then owns the
+//     mouse, and a lasso box dragged on the desktop comes back as an intent —
+//     the tank decides which fish were caught
 //   * frames are throttled, and stop entirely when no fish is outside
-//   * grab / drag / drop are forwarded as intent, never as position: the tank
-//     decides where the fish actually ends up
 
 export class DesktopLayer {
   constructor() {
@@ -23,9 +22,8 @@ export class DesktopLayer {
     this.lastSent = 0;
     this.lastCount = 0;
     this.seq = 0;
-    this.onGrab = null;
-    this.onDrag = null;
-    this.onDrop = null;
+    this.onLasso = null;
+    this.onHuntOff = null;
     this._inputBound = false;
     this._readyBound = false;
     this._readyWaiters = [];
@@ -69,8 +67,13 @@ export class DesktopLayer {
     });
   }
 
-  /** The page may boot before or after us; the ping covers both orders. */
-  handshake(timeout = 3000) {
+  /**
+   * The page may boot before or after us; the ping covers both orders.
+   * The timeout is generous on purpose: a cold WebView2 can take several
+   * seconds to load its first page, and giving up early would close the
+   * boundary the user just asked to open.
+   */
+  handshake(timeout = 6000) {
     return new Promise((resolve) => {
       let settled = false;
       const finish = (ok) => {
@@ -91,16 +94,15 @@ export class DesktopLayer {
     if (this._inputBound) return;
     this._inputBound = true;
 
-    const forward = (name, handler) =>
-      this.tauri.event.listen(name, (event) => {
-        const payload = event.payload || {};
-        if (!handler) return;
-        handler(payload.id, payload.x, payload.y);
-      });
+    this.tauri.event.listen("overlay-lasso", (event) => {
+      const p = event.payload || {};
+      if (this.onLasso) this.onLasso(p.x1, p.y1, p.x2, p.y2);
+    });
 
-    forward("overlay-grab", (id, x, y) => this.onGrab && this.onGrab(id, x, y));
-    forward("overlay-drag", (id, x, y) => this.onDrag && this.onDrag(id, x, y));
-    forward("overlay-drop", (id, x, y) => this.onDrop && this.onDrop(id, x, y));
+    this.tauri.event.listen("overlay-hunt-off", () => {
+      this.hunting = false;
+      if (this.onHuntOff) this.onHuntOff();
+    });
   }
 
   setHunt(on) {
@@ -110,7 +112,7 @@ export class DesktopLayer {
   }
 
   /** Push the outside-fish snapshot at ~30 Hz, never more often. */
-  frame(stamp, snapshot) {
+  frame(stamp, snapshot, size) {
     if (!this.visible || !this.ready) return;
     // nothing outside, and nothing was outside last time either: the layer has
     // already been cleared, so there is nothing to send
@@ -118,7 +120,7 @@ export class DesktopLayer {
     if (stamp - this.lastSent < 28) return;
     this.lastSent = stamp;
     this.lastCount = snapshot.length;
-    const payload = { seq: ++this.seq, fish: snapshot.slice() };
+    const payload = { seq: ++this.seq, fish: snapshot.slice(), size };
     this.tauri.event.emit("tank-frame", payload);
   }
 }

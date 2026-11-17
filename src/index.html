@@ -25,7 +25,7 @@
             id="btn-hunt"
             type="button"
             aria-pressed="false"
-            title="开启后，鼠标靠近小鱼才接住点击"
+            title="开启后，在桌面上拖动框住小鱼，它们就会游回鱼缸"
             disabled
           >
             捞鱼
@@ -59,12 +59,54 @@
         <input id="set-fps" type="checkbox" />
       </div>
       <div class="row">
+        <label for="set-count">鱼的数量</label>
+        <span class="slider">
+          <input id="set-count" type="range" min="3" max="8" step="1" />
+          <output id="set-count-val" for="set-count">5</output>
+        </span>
+      </div>
+      <div class="row">
+        <label for="set-size">鱼的大小</label>
+        <span class="slider">
+          <input id="set-size" type="range" min="12" max="22" step="1" />
+          <output id="set-size-val" for="set-size">15px</output>
+        </span>
+      </div>
+      <div class="row">
+        <label for="set-liveliness">活泼程度</label>
+        <span class="slider">
+          <input id="set-liveliness" type="range" min="0.5" max="2" step="0.1" />
+          <output id="set-liveliness-val" for="set-liveliness">普通</output>
+        </span>
+      </div>
+      <div class="row">
+        <label for="set-custom">自定义小鱼</label>
+        <span class="custom-edit">
+          <input
+            id="set-custom"
+            type="text"
+            maxlength="16"
+            placeholder="字符造型"
+            spellcheck="false"
+          />
+          <button id="btn-custom-add" type="button">添加</button>
+        </span>
+      </div>
+      <div class="row" id="custom-live" hidden>
+        <label>已养</label>
+        <span class="custom-live">
+          <span id="custom-glyph" class="custom-glyph"></span>
+          <button id="btn-custom-dir" type="button">头朝右</button>
+          <button id="btn-custom-remove" type="button">移除</button>
+        </span>
+      </div>
+      <div class="row">
         <label>透明层自检</label>
         <button id="btn-tech" type="button">运行</button>
       </div>
       <pre id="tech-out" hidden></pre>
       <p class="hint">
-        空格暂停 · Esc 关闭面板。打开边界后小鱼会游到桌面上：默认不挡鼠标，开启捞鱼模式后只有靠近小鱼的地方才接住点击。
+        空格暂停 · Esc 关闭面板。打开边界后小鱼会游到桌面上：鼠标靠近它们会躲开，久放不动它们会好奇地凑过来嘬一嘬。捞鱼模式：按住拖动框住小鱼，它们就会游回鱼缸（Esc 或右键收起渔网）。
       </p>
     </section>
 

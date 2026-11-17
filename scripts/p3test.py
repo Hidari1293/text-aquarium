@@ -61,10 +61,30 @@ def main():
         # ---------------------------------------------------------- start --
         section("startup")
         state = tank.probe()
-        check("three fish, all inside", state["counts"]["tank"] == 3, str(state["counts"]))
+        check(
+            "the school is complete, all inside",
+            state["counts"]["tank"] == state["fishCount"] and state["counts"]["desk"] == 0,
+            str(state["counts"]),
+        )
+        check("count matches the setting", state["fishCount"] == state["settings"]["count"], f"fishCount {state['fishCount']}")
         check("boundary starts closed", state["stage"] == "closed", state["stage"])
         check("only the tank window exists", state["windows"] == ["tank"], str(state["windows"]))
         check("geometry is known", state["tankRect"]["w"] > 100, json.dumps(state["tankRect"]))
+
+        # keep the real cursor out of the motion checks: the fish flee a live
+        # one, which would make the speed assertions meaningless
+        tank.run("__cursor('off')")
+        tank.run("__cursor('tank', 50, 50)")
+        st = tank.probe()
+        check(
+            "cursor harness works",
+            st["cursor"]["tank"]["active"] and st["cursor"]["tank"]["x"] == 50,
+            json.dumps(st["cursor"]),
+        )
+        tank.run("__cursor('off')")
+        # a fish startled by the harness cursor may still be bolting at 3.6x
+        # speed: let the dart finish before measuring plain swimming
+        time.sleep(0.8)
 
         # --------------------------------------------------------- motion --
         section("the fish swim, and they swim head first")
@@ -78,7 +98,9 @@ def main():
         check("every fish moved", all(m["d"] > 1.0 for m in moved), ", ".join(f"{m['id']} {m['d']:.1f}px" for m in moved))
         check(
             "no fish jumped",
-            all(m["d"] < 60 for m in moved),
+            # the legit ceiling is now the startle dart (3.6x the fastest fish,
+            # ~128px/s -> 115px in 0.9s); a teleport is an order of magnitude more
+            all(m["d"] < 130 for m in moved),
             f"max {max(m['d'] for m in moved):.1f}px in 0.9s",
         )
         facing_ok = all(
@@ -111,7 +133,9 @@ def main():
             prev = now
 
         check("a fish really swam out", crossings > 0, f"{crossings} crossing(s) seen")
-        check("the crossing did not teleport", teleport and max(teleport) < 12, f"max gap {max(teleport):.1f}px" if teleport else "n/a")
+        # the gap is the fish's legitimate motion between two probes (~0.2s at
+        # the 2.1x exit hurry) — a real teleport would be the 250px shift
+        check("the crossing did not teleport", teleport and max(teleport) < 30, f"max gap {max(teleport):.1f}px" if teleport else "n/a")
 
         state = tank.probe()
         outside = desktop_fish(state)
@@ -153,73 +177,200 @@ def main():
         check("canvas capture written", os.path.getsize(png) > 2000, f"{os.path.getsize(png)} bytes")
 
         # --------------------------------------------------------- catch ---
-        section("catching a fish with the mouse")
+        section("catching fish with a box")
+        # the crossing watch above can take a while: by now some fish may have
+        # wandered home on their own — wait for a fresh one to be outside
+        desk_state = wait_for(
+            lambda: (lambda s: s if any(f["space"] == "desk" for f in s["fish"]) else None)(tank.probe()),
+            25,
+        )
+        check("there is a fish on the desktop to catch", bool(desk_state))
+
         tank.click("btn-hunt")
         op = wait_for(lambda: (lambda o: o if o["hunting"] else None)(overlay.probe()), 6)
         check("catching mode is on", bool(op), str(op and op["hunting"]))
+        check("the net owns the whole desktop while hunting", bool(op) and op["hittable"])
 
         target = None
-        for f in overlay.probe()["fish"]:
+        op = overlay.probe()
+        for f in op["fish"]:
             cx = f["x"] - op["deskOffset"]["x"]
             cy = f["y"] - op["deskOffset"]["y"]
-            if -100 < cx < op["size"][0] + 100:
+            if -100 < cx < op["sizePx"][0] + 100:
                 target = (f, cx, cy)
                 break
         check("a fish to aim at", target is not None)
         if target:
             fish, cx, cy = target
-            overlay.pointer("down", cx, cy)
-            state = tank.probe()
-            held = [f for f in state["fish"] if f["state"] == "dragging"]
-            check("pointer down takes hold", len(held) == 1, held[0]["id"] if held else "none")
-
-            # somewhere on the desktop that is definitely *not* over the tank
-            rect = state["tankRect"]
-            away_x = min(rect["x"] + rect["w"] + 250, 1400)
-            away_y = min(rect["y"] + rect["h"] + 180, 840)
-            overlay.pointer("move", away_x, away_y)
-            time.sleep(0.25)
-            state = tank.probe()
-            held = [f for f in state["fish"] if f["state"] == "dragging"]
-            if held:
-                dx = held[0]["x"] - fish["x"]
-                check(
-                    "the fish follows the hand",
-                    abs(dx - (away_x - cx)) < 40,
-                    f"moved {dx:.0f}px of {away_x - cx:.0f}",
-                )
-            else:
-                check("the fish follows the hand", False, "lost the fish")
-
-            # drop it back on the desktop
-            overlay.pointer("up", away_x, away_y)
+            # drag a box around it: down, across, up. Each __pointer round-trip
+            # takes ~100ms, so the box must outrun the fish (max ~36px/s).
+            overlay.pointer("down", cx - 42, cy - 30)
+            overlay.pointer("move", cx + 42, cy + 30)
+            overlay.pointer("up", cx + 42, cy + 30)
             time.sleep(0.3)
             state = tank.probe()
-            dropped = [f for f in state["fish"] if f["id"] == fish["id"]][0]
-            check("letting go resumes swimming", dropped["state"] in ("outside", "returning"), dropped["state"])
+            caught = [f for f in state["fish"] if f["id"] == fish["id"]]
+            check(
+                "the boxed fish is on its way home",
+                bool(caught) and caught[0]["state"] == "returning",
+                caught[0]["state"] if caught else "vanished",
+            )
 
-            # grab again and put it in the tank
+            # a box in a corner far from every fish catches nothing
             op = overlay.probe()
-            live = [f for f in op["fish"] if f["id"] == fish["id"]]
-            if live:
-                lx = live[0]["x"] - op["deskOffset"]["x"]
-                ly = live[0]["y"] - op["deskOffset"]["y"]
-                overlay.pointer("down", lx, ly)
-                rect = state["tankRect"]
-                overlay.pointer("move", rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
+            pts = [(f["x"] - op["deskOffset"]["x"], f["y"] - op["deskOffset"]["y"]) for f in op["fish"]]
+            corners = [
+                (60, 60),
+                (op["sizePx"][0] - 60, 60),
+                (60, op["sizePx"][1] - 60),
+                (op["sizePx"][0] - 60, op["sizePx"][1] - 60),
+            ]
+            ex = ey = None
+            for cand in corners:
+                if all(((cand[0] - x) ** 2 + (cand[1] - y) ** 2) ** 0.5 > 220 for x, y in pts):
+                    ex, ey = cand
+                    break
+            if ex is not None:
+                overlay.pointer("down", ex - 30, ey - 20)
+                overlay.pointer("move", ex + 30, ey + 20)
+                overlay.pointer("up", ex + 30, ey + 20)
                 time.sleep(0.2)
-                overlay.pointer("up", rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
-                time.sleep(0.35)
                 state = tank.probe()
-                home = [f for f in state["fish"] if f["id"] == fish["id"]][0]
-                check("dropped in the tank, it is a tank fish again", home["space"] == "tank", home["space"])
-                check("and it is ink again", home["colorMix"] == 0, str(home["colorMix"]))
+                # the boundary is open, so fish come and go on their own; the
+                # real claim is "the box caught nobody": no fish near the box
+                # was sent home by it (a fish cannot swim 220px in 0.2s, so
+                # the corner was still empty)
+                victims = [
+                    f["id"]
+                    for f in state["fish"]
+                    if f["state"] == "returning"
+                    and ((f["x"] - ex) ** 2 + (f["y"] - ey) ** 2) ** 0.5 < 120
+                ]
+                check("an empty box changes nothing", not victims, f"returning near the box: {victims}")
             else:
-                check("dropped in the tank, it is a tank fish again", False, "fish vanished")
+                check("an empty box changes nothing", False, "no empty corner found")
+
+            # and the caught one really gets home
+            home = wait_for(
+                lambda: (
+                    lambda s: s
+                    if any(f["id"] == fish["id"] and f["space"] == "tank" for f in s["fish"])
+                    else None
+                )(tank.probe()),
+                30,
+            )
+            check("it made it back into the tank", bool(home))
+            if home:
+                back = [f for f in home["fish"] if f["id"] == fish["id"]][0]
+                check("and it is ink again", back["colorMix"] == 0, str(back["colorMix"]))
 
         tank.click("btn-hunt")
         time.sleep(0.3)
         check("catching mode off again", not overlay.probe()["hunting"])
+
+        # --------------------------------------------------- custom fish ---
+        section("a fish the user typed themselves")
+        tank.run(
+            "const e=document.getElementById('set-custom'); e.value='><>';"
+            " document.getElementById('btn-custom-add').click();"
+        )
+        time.sleep(0.6)
+        state = tank.probe()
+        custom = [f for f in state["fish"] if f["id"] == "fish-custom"]
+        total = state["counts"]["tank"] + state["counts"]["desk"]
+        check(
+            "the custom fish joined the school",
+            len(custom) == 1 and total == state["fishCount"] + 1,
+            str(state["counts"]),
+        )
+        if custom:
+            check("it wears the user's text", custom[0]["glyph"] == "><>", custom[0]["glyph"])
+            # the setting file survives between test runs, so the direction is
+            # whatever the last run left it: the fish must simply follow it
+            before_dir = state["settings"]["customFacing"]
+            check(
+                "it follows the direction setting",
+                custom[0]["canonFacing"] == before_dir,
+                f"setting {before_dir} -> fish {custom[0]['canonFacing']}",
+            )
+            tank.click("btn-custom-dir")
+            time.sleep(0.5)
+            state = tank.probe()
+            custom = [f for f in state["fish"] if f["id"] == "fish-custom"]
+            check(
+                "its direction can be swapped",
+                bool(custom) and custom[0]["canonFacing"] == -before_dir,
+                str(custom[0]["canonFacing"] if custom else None),
+            )
+            tank.click("btn-custom-remove")
+            time.sleep(0.5)
+            state = tank.probe()
+            total = state["counts"]["tank"] + state["counts"]["desk"]
+            check("and it can be removed", total == state["fishCount"], str(state["counts"]))
+        else:
+            check("it wears the user's text", False, "fish missing")
+            check("and faces right as written", False, "fish missing")
+            check("its direction can be swapped", False, "fish missing")
+            check("and it can be removed", False, "fish missing")
+
+        # --------------------------------------------------- interactions ---
+        section("the cursor is part of the world")
+        tank.run("__cursor('on')")
+        # a fish that is free-swimming, not one already on a mission home
+        desk_state = wait_for(
+            lambda: (
+                lambda s: s
+                if any(f["space"] == "desk" and f["state"] == "outside" for f in s["fish"])
+                else None
+            )(tank.probe()),
+            25,
+        )
+        desk = (
+            [f for f in desk_state["fish"] if f["space"] == "desk" and f["state"] == "outside"]
+            if desk_state
+            else []
+        )
+        if desk:
+            f = desk[0]
+            tank.run(f"__cursor('desk', {f['x'] + 8}, {f['y']})")
+            time.sleep(0.8)
+            state = tank.probe()
+            live = [x for x in state["fish"] if x["id"] == f["id"]][0]
+            d = ((live["x"] - f["x"] - 8) ** 2 + (live["y"] - f["y"]) ** 2) ** 0.5
+            check("a near cursor scares a fish away", d > 12, f"{d:.0f}px from the cursor")
+
+            # an idle cursor becomes a curiosity: over it comes, and pecks.
+            # A fish may be on its post-nibble cooldown, so try a few of them.
+            nibbled = None
+            tried = set()
+            for _attempt in range(3):
+                state = tank.probe()
+                candidates = [
+                    x
+                    for x in state["fish"]
+                    if x["space"] == "desk" and x["state"] == "outside" and x["id"] not in tried
+                ]
+                if not candidates:
+                    break
+                guest = candidates[0]
+                tried.add(guest["id"])
+                tank.run(f"__cursor('desk', {guest['x'] + 55}, {guest['y']})")
+                tank.run("__cursor('idle', 60)")
+                nibbled = wait_for(
+                    lambda: (
+                        lambda s: s
+                        if any(x["id"] == guest["id"] and x["mood"] == "nibble" for x in s["fish"])
+                        else None
+                    )(tank.probe()),
+                    9,
+                )
+                if nibbled:
+                    break
+            check("an idle cursor earns a curious peck", bool(nibbled), "nibble seen" if nibbled else "never")
+        else:
+            check("a near cursor scares a fish away", False, "no desk fish")
+            check("an idle cursor earns a curious peck", False, "no desk fish")
+        tank.run("__cursor('off')")
 
         # ------------------------------------------------------ flip-flop ---
         section("closing, and changing your mind half way")
@@ -232,9 +383,17 @@ def main():
         check("re-opening cancels the return", bool(state), state and state["stage"])
         check("still exactly one desktop layer", tank.probe()["windows"].count("overlay") == 1)
 
-        # now let it close for real
+        # now let it close for real — the layer's destroy is async, so wait
+        # for both the stage and the window list to settle
         tank.click("btn-boundary")
-        state = wait_for(lambda: (lambda s: s if s["stage"] == "closed" else None)(tank.probe()), 60)
+        state = wait_for(
+            lambda: (
+                lambda s: s
+                if s["stage"] == "closed" and "overlay" not in s["windows"]
+                else None
+            )(tank.probe()),
+            60,
+        )
         check("boundary closes", bool(state), state and state["stage"])
         check("the layer is destroyed", state and "overlay" not in state["windows"], str(state and state["windows"]))
         check("all fish are home", state and state["counts"]["desk"] == 0, str(state and state["counts"]))
@@ -262,7 +421,11 @@ def main():
         else:
             check("five open/close cycles all end cleanly", True)
             state = tank.probe()
-            check("one window, three fish", state["windows"] == ["tank"] and state["counts"]["tank"] == 3)
+            check(
+                "one window, whole school home",
+                state["windows"] == ["tank"] and state["counts"]["tank"] == state["fishCount"],
+                str(state["counts"]),
+            )
             check("state is consistent", all(f["state"] in ("inside", "crossing") for f in state["fish"]))
 
         # --------------------------------------------------------- pause ----

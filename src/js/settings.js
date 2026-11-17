@@ -12,6 +12,16 @@ export const DEFAULTS = {
   bubbles: true,
   /** false = 30 fps while focused (default), true = 60 fps */
   highFps: false,
+  /** how many fish live in the tank (3–8) */
+  count: 5,
+  /** glyph size in css px (12–22) */
+  size: 15,
+  /** speed and curiosity in one knob (0.5–2.0) */
+  liveliness: 1,
+  /** a user-typed fish swimming next to the standard school ("" = none) */
+  customGlyph: "",
+  /** which way the custom text faces as written: 1 = right (head first) */
+  customFacing: 1,
 };
 
 function merge(raw) {

@@ -32,6 +32,7 @@ pub fn run() {
             overlay::overlay_click_through,
             overlay::tank_placement,
             overlay::cursor_pos,
+            overlay::screen_pixel,
             overlay::work_area,
             techcheck::tech_check,
             debug::debug_log,

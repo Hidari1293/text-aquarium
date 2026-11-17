@@ -14,13 +14,14 @@
 
 const DIR_NAME = "text-aquarium-dump";
 
-export function installTestHooks(page, { probe, shot, pointer }) {
+export function installTestHooks(page, { probe, shot, pointer, cursor }) {
   const tauri = window.__TAURI__;
   if (!tauri || location.hostname !== "127.0.0.1") return;
 
   if (probe) window.__probe = probe;
   if (shot) window.__shot = shot;
   if (pointer) window.__pointer = pointer;
+  if (cursor) window.__cursor = cursor;
   window.__dumpDir = DIR_NAME;
 
   const channel = `cmd-${page}.js`;

@@ -20,12 +20,13 @@ import time
 from ctypes import wintypes as wt
 
 import numpy as np
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from p2test import activate, click, describe, find_fish_fast, hit, overlay, tank, u  # noqa: E402
+from p3drive import ensure_dev_server  # noqa: E402
 
 ROOT = os.path.dirname(HERE)
 EXE = os.path.join(ROOT, "src-tauri", "target", "debug", "text-aquarium.exe")
@@ -198,18 +199,46 @@ def set_paused(hwnd, pause_pt, want):
     return False
 
 
-def catch_mode(hwnd, hunt_pt, fx, fy, ov, want, tries=3):
-    """Toggle catching and confirm it on the fish itself.
-
-    Catching is only proven by Windows handing the pixel to the layer, so every
-    attempt puts the cursor back on the fish before judging.
-    """
+def hunt_on(hwnd, hunt_pt, ov, tries=3):
+    """Click the net button and confirm the layer now owns the whole desktop."""
     for _ in range(tries):
         tap(hwnd, hunt_pt)
-        u.SetCursorPos(int(fx), int(fy))
-        if wait(lambda: is_overlay(fx, fy, ov) == want, 1.6)[0]:
+        if wait(lambda: is_overlay(hunt_pt[0], hunt_pt[1], ov), 1.6)[0]:
             return True
-    return is_overlay(fx, fy, ov) == want
+    return False
+
+
+def hunt_off(ov, x, y, tries=3):
+    """Right click on the layer: the net goes away, clicks flow again."""
+    for _ in range(tries):
+        u.SetCursorPos(int(x), int(y))
+        time.sleep(0.15)
+        u.mouse_event(0x0008, 0, 0, 0, 0)  # RIGHTDOWN
+        time.sleep(0.1)
+        u.mouse_event(0x0010, 0, 0, 0, 0)  # RIGHTUP
+        if wait(lambda: not is_overlay(x, y, ov), 1.6)[0]:
+            return True
+    return False
+
+
+def drag_box(x1, y1, x2, y2):
+    """Press, drag, release — the lasso that catches whatever is inside.
+
+    The press is held a beat before moving: the very first click on the layer
+    may hand the window focus, and a real gesture moves through a couple of
+    intermediate points anyway.
+    """
+    u.SetCursorPos(int(x1), int(y1))
+    time.sleep(0.25)
+    u.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+    time.sleep(0.35)
+    for step in (0.4, 0.8):
+        u.SetCursorPos(int(x1 + (x2 - x1) * step), int(y1 + (y2 - y1) * step))
+        time.sleep(0.12)
+    u.SetCursorPos(int(x2), int(y2))
+    time.sleep(0.25)
+    u.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+    time.sleep(0.25)
 
 
 def bring_to_front(hwnd, tries=6):
@@ -232,6 +261,10 @@ def main():
     os.makedirs(SHOTS, exist_ok=True)
     subprocess.run(["taskkill", "/F", "/IM", "text-aquarium.exe"], capture_output=True)
     time.sleep(0.6)
+    # The debug-profile exe loads its pages from the dev server (devUrl); this
+    # suite asserts pixels and Win32 hit tests, not where the assets came from,
+    # so start the server the same way p3test does.
+    ensure_dev_server()
     proc = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
     hwnd, _ = wait(tank, 20)
     if not hwnd:
@@ -279,10 +312,17 @@ def main():
         proc.kill()
         return 1
     create_s = time.time() - t0
+    # the layer is created hidden, anchored, then shown and re-anchored: give
+    # the geometry a moment to settle instead of measuring a mid-flight window
     area = work_area()
     r = wt.RECT()
-    u.GetWindowRect(ov, ctypes.byref(r))
-    box = (r.left, r.top, r.right, r.bottom)
+    box = None
+    for _settle in range(50):
+        u.GetWindowRect(ov, ctypes.byref(r))
+        box = (r.left, r.top, r.right, r.bottom)
+        if box == area:
+            break
+        time.sleep(0.1)
     check("layer covers exactly the work area", box == area, f"{box} vs {area}")
     check("layer stops above the taskbar", r.bottom <= area[3], f"bottom={r.bottom} taskbar@{area[3]}")
 
@@ -295,12 +335,15 @@ def main():
         hunt = spots[2]
 
     # ---- fish reach the desktop -------------------------------------------
+    # A fish that just crossed is still fading in (colour ramps 0 -> 1 over
+    # ~0.6s); its washed-out pixels would read as a tiny cluster. Wait for a
+    # solid one, so "fully coloured" is a fact by the time we pause and aim.
     found = []
     deadline = time.time() + 60
     while time.time() < deadline:
         park()
         img = grab()
-        found = fish_on_desk(img)
+        found = [c for c in fish_on_desk(img) if c["n"] >= 150]
         if found:
             break
         time.sleep(0.8)
@@ -356,30 +399,95 @@ def main():
     time.sleep(0.3)
     check("empty water passes clicks through", not is_overlay(mx, my, ov), describe(hit(mx, my)[1]))
 
-    # ---- catching mode ----------------------------------------------------
-    caught = catch_mode(hwnd, hunt, fx, fy, ov, True)
-    check("catch mode grabs the fish", caught, describe(hit(fx, fy)[1]))
+    # ---- catching mode: the net owns the whole desktop ---------------------
+    on = hunt_on(hwnd, hunt, ov)
+    check("catch mode makes the layer own the fish", on and is_overlay(fx, fy, ov), describe(hit(fx, fy)[1]))
     u.SetCursorPos(mx, my)
-    away, took = wait(lambda: not is_overlay(mx, my, ov), 2.0, 0.05)
-    check("releases as soon as the cursor leaves", bool(away), f"{took:.2f}s")
-    check("other software stays clickable while catching", not is_overlay(mx, my, ov), describe(hit(mx, my)[1]))
+    time.sleep(0.2)
+    check("the net covers the whole desktop while catching", is_overlay(mx, my, ov), describe(hit(mx, my)[1]))
 
-    off = catch_mode(hwnd, hunt, fx, fy, ov, False)
-    check("catch mode off restores pass-through", off, describe(hit(fx, fy)[1]))
+    # ---- the lasso: a box around the frozen fish ---------------------------
+    # the fish is still paused, so the box cannot miss a moving target; the
+    # fish hold still for the net anyway (dodge is suspended while hunting)
+    drag_box(fx - 45, fy - 22, fx + 45, fy + 22)
+    time.sleep(0.4)
+
+    # ---- right click puts the net away -------------------------------------
+    off = hunt_off(ov, mx, my)
+    check("right click puts the net away", off, describe(hit(mx, my)[1]))
+    u.SetCursorPos(int(fx), int(fy))
+    time.sleep(0.3)
+    check("catch mode off restores pass-through", not is_overlay(fx, fy, ov), describe(hit(fx, fy)[1]))
+
+    # ---- the boxed fish leaves its spot and swims home ---------------------
+    # the unpause must be *verified*: a swallowed click here leaves the whole
+    # sim paused, and the boundary button politely refuses to close while
+    # paused — which is exactly how this test used to lose 80 seconds
+    if not set_paused(hwnd, pause, False):
+        check("unpause before the close", False, "the fish would not resume")
+        proc.kill()
+        return 1
+    # the caught fish leaves its spot: either the target cluster itself is
+    # gone, or the school on the desk has shrunk by one (two independent
+    # signals — a same-colour fish can wander through the spot and mask the
+    # first one)
+    def desk_count():
+        return len([c for c in fish_on_desk(grab()) if c["n"] >= 150])
+
+    # the true number of fish outside: sampling noise only ever undercounts
+    # (nearby fish merge into one cluster), so take the max over a few looks
+    count_before = max(desk_count() for _ in range(3))
+    left, took = wait(
+        lambda: (
+            not any(
+                c["name"] == target["name"] and abs(c["x"] - fx) < 150 and abs(c["y"] - fy) < 150
+                for c in fish_on_desk(grab())
+            )
+        )
+        or desk_count() < count_before,
+        45,
+        0.5,
+    )
+    check("the boxed fish left its spot for home", bool(left), f"{took:.2f}s")
 
     # ---- close the boundary ------------------------------------------------
-    tap(hwnd, pause)  # let the fish swim home; the close check below proves it
+    # A swallowed click must not fail the whole run — but a blind retry must
+    # not happen either: tapping again mid-return *reopens* the boundary by
+    # design. The honest retry test: after the tap, the fish start leaving
+    # their spots; if none do, the click never landed.
     t0 = time.time()
+    park()
+    before_close = [c for c in fish_on_desk(grab()) if c["n"] >= 150]
     tap(hwnd, boundary)
-    if not wait(lambda: not overlay(), 20, 0.2)[0]:
-        tap(hwnd, boundary)  # a swallowed click should not fail the whole run
-    gone = wait(lambda: not overlay(), 40, 0.2)[0]
+    for _retry in range(2):
+        time.sleep(8)
+        now = [c for c in fish_on_desk(grab()) if c["n"] >= 150]
+        if len(now) < len(before_close):
+            break
+        tap(hwnd, boundary)
+        park()
+    # with the voluntary return gone, fish roam the whole desk: the slowest
+    # one may need up to ~50s to swim home from the far corner
+    gone = wait(lambda: not overlay(), 60, 0.2)[0]
     check("desktop layer destroyed on close", bool(gone), f"{time.time() - t0:.2f}s")
     park()
     img = grab(os.path.join(SHOTS, "smoke-3-back.png"))
     back = border_fill(img, frame)
     check("frame solid again", back > 0.99, f"fill={back:.2f}")
     left = fish_on_desk(img)
+    # small matches can be other apps' UI: only a fish-sized cluster counts,
+    # and a cluster that was already there before the boundary opened is the
+    # user's desktop, not a fish
+    base = fish_on_desk(Image.open(os.path.join(SHOTS, "smoke-1-closed.png")))
+    left = [
+        c
+        for c in left
+        if c["n"] >= 150
+        and not any(
+            b["name"] == c["name"] and abs(b["x"] - c["x"]) < 60 and abs(b["y"] - c["y"]) < 60
+            for b in base
+        )
+    ]
     check("no fish left on the desktop", not left, f"{len(left)} cluster(s)")
 
     print(f"\ndesktop layer appeared in {create_s:.2f}s", flush=True)

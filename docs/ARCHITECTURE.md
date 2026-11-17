@@ -58,6 +58,7 @@ tank: simulation.step(dt)
 
 - 快照里只有 `space === "desk"` 的鱼，字段：`id / g(字形) / x / y / f(朝向) / m(颜色混合) / c(颜色)`,
   以及 `w(波动相位) / p(俯仰) / a(波幅)`——身体形状要跟着鱼一起过边界，否则接缝处会“直”一下。
+  帧级还带 `size`（鱼的当前字号），两个画布的字形缓存都按 `字形@尺寸` 键控。
 - 没有鱼在外时**不发帧**，桌面层的 `requestAnimationFrame` 随之停掉。
 - 位置是**桌面坐标**，已经是最终值，桌面层不做任何换算（除了减去自己的原点）。
 - 节流 28ms，`seq` 单调递增，方便排查丢帧。
@@ -110,17 +111,29 @@ tank: simulation.step(dt)
 ## 输入策略（不挡鼠标）
 
 桌面层默认 `WS_EX_TRANSPARENT`（`set_ignore_cursor_events(true)`），
-点击直接落到下面的程序上。
+点击直接落到下面的程序上——只有一个例外：**捞鱼模式**。用户显式拿出渔网后，
+桌面层接管整个屏幕的鼠标（任务书本来就允许的显式模式），拖动即框选；
+Esc / 右键 / 窗口失焦立即收网，穿透恢复。捞鱼模式永远不会把用户锁在透明层里。
 
-「捞鱼」模式打开后，桌面层**不是**整屏接管，而是每 55ms 问一次 `cursor_pos`：
+光标本身也是鱼的世界的一部分（模拟跑在鱼缸窗口，它是唯一大脑）：
 
 ```
-光标离任一条鱼的字形框 < 14px  → set_ignore_cursor_events(false)  能被点到
-否则                            → set_ignore_cursor_events(true)   照常穿透
+缸内光标   pointermove 事件（鱼缸画布）
+桌面光标   鱼缸窗口每 100ms 轮询 cursor_pos（仅边界开启时；Rust 命令）
+              │
+              ▼
+sim.setCursor(space, x, y)  → 每帧喂给 world.cursor {x, y, active, idle}
+              │
+   idle < 2s 且距离 < 46px     → mood "dodge"：3.6× 速度、2.5× 转向的惊跳，
+                                  0.45s 结束（真正的 startle response）
+   idle > ~4s 且距离 < ~70px   → mood "curious"：游向"鼻尖落点"（光标 + 朝向 ×
+                                  半宽），70px 内到达刹车，第一嘬滑铲到鼻尖贴光标，
+                                  之后 2–4 下小幅啄动
+   （阈值随"活泼程度"设置变化；捞鱼模式下光标整体禁用，鱼不躲网；
+   躲闪/好奇/嘬豁免分离力，正在嘬的鱼 returnAt 顺延 8s）
 ```
 
-所以"只有小鱼那一小块会接住点击"，屏幕其余部分仍然正常使用。
-代价：光标刚离开小鱼的那 55ms 内，桌面层还是可命中的；点空白处会立刻恢复穿透。
+只在鱼自由巡航（无目标）时触发；正在出缸/回缸的鱼不受打扰。
 
 ## 目录
 
@@ -133,9 +146,9 @@ src/
   styles/desktop.css    透明页（hunting / can-grab 两个状态类）
   js/main.js            启动、主循环、边界状态机、按钮与面板接线
   js/simulation.js      世界容器：几何、越界/回缸、抓取/拖动/放下、快照
-  js/fish.js            单条鱼：空间、状态、颜色、积分、巡航目标、硬边界兜底
+  js/fish.js            单条鱼：空间、状态、心情（躲闪/好奇/嘬）、颜色、巡航目标、硬边界兜底；fishProfile(n) 生成唯一 id + 色族变体
   js/fish-behavior.js   纯函数转向：避墙、避让
-  js/glyph.js           字形布局：逐字符纵向偏移 = 身体波动 + 头尾俯仰
+  js/glyph.js           字形布局：逐字符纵向偏移 = 身体波动 + 头尾俯仰；掉头 = 反序 + 逐字符镜像（`MIRROR` 表），波纹按鼻端锚定
   js/coordinates.js     桌面坐标、颜色混合、矩形几何
   js/aquarium.js        鱼缸 Canvas 渲染（鱼/海草/气泡/砂砾，离屏背景 + 脏矩形）
   js/desktop-overlay.js 鱼缸这一侧的桌面层控制（创建/销毁/推帧/捞鱼开关/拖动转发）
@@ -157,7 +170,7 @@ scripts/
   make-icon.py          用 Pillow 生成图标源图
   grab.py               截图工具（开发自测用）
   p2test.py             Win32 + 像素工具箱（命中测试、找鱼、窗口几何）
-  p2smoke.py            整链路冒烟测试：25 项断言（需要未锁屏的桌面）
+  p2smoke.py            整链路冒烟测试：25 项断言（需要未锁屏的桌面；自动起 dev server）
   p3drive.py            测试通道客户端：让页面执行命令、导出状态/画布
   p3test.py             Phase 3/4 集成测试：39 项断言
   simtest.mjs           运动/字形/状态逻辑测试：44 项断言，不需要窗口
@@ -183,14 +196,21 @@ scripts/
 - 鱼缸：水草/气泡/砂砾画进离屏画布，14Hz 刷新；鱼只擦自己上一帧的方框，再从离屏背景
   把那块补回来。全画布 clear + blit 是这一层最贵的事。
 - 桌面层：只清/画有墨的矩形，设备像素比上限 1.5（15px 字形再高看不出差别）。
+  彩色的鱼在常规字重上叠一层 bold 通道 + 四个 ±0.6px 的错位描边（透明度 =
+  `colorMix`），加粗随颜色渐入渐出，回缸前已恢复细体——鱼缸画布永远只画墨黑细体。
+- **颜色自适应**：鱼缸每 ~400ms 采样一条桌面鱼的背景（Rust `screen_pixel`，
+  GetPixel 读合成桌面），鱼对亮度 0.2 平滑。快照里 `c`（鱼身色）与 `i`（墨色）
+  都是按背景亮度调过的：深底提亮最多 55%、浅底稍压暗，墨色深底浅灰——回缸
+  淡出在任何壁纸上都可见。
 - 桌面层的绘制循环**没有常驻 rAF**：有帧或有交互才排一帧，画完就停。
 
 ## 鱼的行为模型
 
 每条鱼持有一份参数（速度、转向速率、游荡幅度、游荡间隔）。
 **它永远在游向某个点**：有任务时游向任务点（出口 / 回家的缸内点），
-没有任务时游向一个 `cruise` 目标——离自己至少 240px（或缸宽 40%），
-到达 34px 内或每隔 0.8–5.4 秒重选一次。
+没有任务时游向一个 `cruise` 目标——沿当前航向 ±52° 向前 240–384px 选一个点，
+再朝最近的水平方向拉回 35%，所以鱼读起来是"往前游"，上下浮动只是调味。
+到达 34px 内或每隔 0.8–5.4 秒重选一次（换目标是修正航向，不是掉头）。
 
 ```
 目标向量 = 目标点方向（+ 慢速摆动）+ 避墙力 × 3.0 + 邻鱼排斥力 × 2.4
@@ -241,34 +261,61 @@ CLOSED ──点开边界──> OPENING ──握手完成──> OPEN
 - `closeBoundary()` 立刻停止生成外游意图，并给缸外鱼 `returnAt = now + 0~1.6s`（错开，不会挤在同一个点上）。
 - 回缸完成由主循环判定（`counts().desk === 0`），然后才销毁桌面层——顺序不能反，否则鱼会凭空消失。
 
-鱼级：`inside | crossing | outside | returning | dragging`
+鱼级：`inside | crossing | outside | returning`
 
-- `crossing` 是"正朝边界游"，中心一过边线就切成 `outside` 并换空间。
+- `crossing` 是"正朝边界游"，中心一过边线就切成 `outside` 并换空间。出缸目标在
+  **鱼面对的那一侧**（`x = w+30 或 -30`，y 钳在缸内），所以鱼只从左右两侧游出。
 - 边界打开时，缸外的鱼过 14~30 秒可能自己游回来（自由进出），回来后过 8~20 秒又可能再出去。
 - 关闭边界时 `returning` 优先于一切：目标点取离它最近的缸内点，并夹在屏幕内（缸挂在屏幕外时不会把鱼拖出屏幕）。
 - 如果夹住之后目标根本进不去（缸几乎完全出屏），鱼会在目标附近停住：2.5 秒后
   `rescue()` 把它放回缸内。这一跳只发生在缸本身看不见的时候，但避免了
   “回缸永不完成 → 透明层永不关闭”的死状态。
-- `dragging`：鼠标按住时位置由 `dragFish()` 直接赋值，物理与转向都不参与；
-  2.5 秒收不到拖动事件就当作松手（层崩了 / 鼠标丢了）。
+- 鱼游到缸门口时用户合上边界：门口的鱼完成越界后立即折返（resolve 按边界状态
+  决定 outside/returning），跨界中的鱼豁免硬钳位——被硬钳位弹回 40px 就是一个瞬移。
+- 回缸交接在**整个字形完全进缸**后才发生（负 pad 的 rectHas），入缸钳位 ≤2px，
+  且交接时鱼已是墨黑，两个画布之间没有接缝。
 
-## 捞鱼链路
+鱼的**心情**（mood，与状态正交）：`cruise | dodge | curious | nibble`。
+只有 `inside`/`outside` 且没有目标（goal===null）的鱼才会进入非 cruise 的心情；
+任务（出缸/回缸）设置时 mood 一律重置为 cruise。
+
+## 捞鱼链路（框选）
 
 ```
-overlay: pointerdown 命中鱼 → emit overlay-grab
-tank:    grabFish(id) → state = dragging
-overlay: pointermove → 本地即时绘制 + 每 16ms emit overlay-drag(桌面坐标)
-tank:    dragFish(id, x, y)  → 位置、朝向（拖动方向）
-overlay: pointerup → emit overlay-drop(桌面坐标)
-tank:    dropFish(id, x, y) → 缸内: enterTank（立即变黑）/ 缸外: outside（18 秒内不再自己往回游）
+用户点「捞鱼」→ hunt 事件 → overlay 接管整个桌面（可命中）+ 底部提示
+overlay: pointerdown（左键）→ lasso 起点（白边黑芯的框）
+overlay: pointermove          → 更新框
+overlay: pointerup            → emit overlay-lasso {x1,y1,x2,y2}（桌面坐标，<16px 扩成小网）
+tank:    lassoFish(rect)      → 框内每条 space=desk、state=outside 的鱼
+                                 → returning + goal = 缸内最近点（不瞬移，游回去）
+overlay: 右键 / Esc / 失焦    → emit overlay-hunt-off → 收网，穿透恢复
 ```
 
-拖动期间桌面层始终可命中；松手后立刻回到“光标靠近鱼才接住”的判定。
+只传意图不传结果：框是 overlay 画的，但”网住谁”由鱼缸唯一的模拟决定。
 
 ## 单实例
 
 第二个实例启动时创建同名 mutex 失败，直接把已有窗口提到前台并退出。
 两个鱼缸 = 两组鱼 + 两层桌面，必须避免。
+
+## 设置
+
+`%APPDATA%\TextAquarium\settings.json`（Rust 落盘，前端优先读文件）共 6 个键：
+
+| 键 | 范围 | 默认 | 生效方式 |
+|---|---|---|---|
+| `seaweed` / `bubbles` / `highFps` | 开关 | 开/开/关 | 渲染开关与帧率 |
+| `count` | 3–8 | 5 | `setFishCount`：增则 `addFish()`（边界开着的新鱼过一会也会出门），减则优先去掉缸内的 |
+| `size` | 12–22 | 15 | `setFishSize`：halfH、波幅、两个渲染器的 runs 缓存全部随尺寸 |
+| `liveliness` | 0.5–2.0 | 1 | 速度倍率 + 好奇心（静置阈值 5.6-1.6L、吸引半径 70+60(L-1)） |
+| `customGlyph` | ≤16 字符 | "" | 用户自定义的鱼（空 = 没有） |
+| `customFacing` | ±1 | 1 | 自定义文字头朝右/左 |
+
+多出来的鱼复用三种字形，颜色按色族取深浅变体，速度 ±8% 抖动，id 唯一
+（`fish-a-1`、`fish-b-2`、…——id 重复会让按 id 寻鱼的一切错乱）。
+自定义鱼游在标准鱼群**之外**：数量滑杆的裁剪只数标准鱼群。
+字形方向由 `GlyphRun(glyph, canonFacing)` 的可选参数覆盖（内置字形仍从首字符
+推导），渲染器缓存键为 `字形@尺寸@朝向`。
 
 ## 视觉约束落点
 

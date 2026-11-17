@@ -27,8 +27,10 @@ export class TankRenderer {
     this.height = 0;
     this.dpr = 1;
     this.currentFont = "";
-    /** glyph -> layout, measured once; fish keep their shape for life */
+    /** "glyph@size" -> layout, measured once per size. */
     this.runs = new Map();
+    /** The fish glyph size (css px), from the sim's settings. */
+    this.size = FISH_SIZE;
 
     // Plants and bubbles are ~100 glyphs. Repainting them 30 times a second is
     // most of the tank's CPU bill for movement nobody can see, so they get
@@ -40,13 +42,14 @@ export class TankRenderer {
     this.ink = [];
   }
 
-  run(glyph) {
-    let run = this.runs.get(glyph);
+  run(glyph, size = this.size, cf) {
+    const key = `${glyph}@${size}@${cf ?? "auto"}`;
+    let run = this.runs.get(key);
     if (run === undefined) {
-      this.useFont(FISH_SIZE);
-      run = new GlyphRun(glyph);
+      this.useFont(size);
+      run = new GlyphRun(glyph, cf);
       run.measure(this.ctx);
-      this.runs.set(glyph, run);
+      this.runs.set(key, run);
     }
     return run;
   }
@@ -89,12 +92,15 @@ export class TankRenderer {
     this.ink.length = 0;
   }
 
-  measure(glyph, size = FISH_SIZE) {
-    return this.run(glyph).width;
+  measure(glyph, size = this.size) {
+    return this.run(glyph, size).width;
   }
 
   render(sim) {
     const ctx = this.ctx;
+    this.size = sim.fishSize || FISH_SIZE;
+    // the nose visibly rises/dips with the heading; scales with the fish
+    this.tiltPx = 5.5 * (this.size / 15);
 
     // Plants and bubbles sway slowly: 14 Hz of backdrop is indistinguishable
     // from 60 and leaves the per-frame budget to the fish.
@@ -217,19 +223,19 @@ export class TankRenderer {
 
   drawFish(fish) {
     const ctx = this.ctx;
-    const run = this.run(fish.glyph);
-    this.useFont(FISH_SIZE);
+    const run = this.run(fish.glyph, this.size, fish.canonFacing);
+    this.useFont(this.size);
     ctx.fillStyle = fish.tankColor;
 
     // one vertical offset per character: the body ripples and the head leans
     // into the heading, which is what makes it swim instead of drift
-    run.layout(fish.facing, fish.wavePhase, fish.waveAmp, fish.pitch);
+    run.layout(fish.facing, fish.wavePhase, fish.waveAmp, fish.pitch, this.tiltPx);
 
     const bx = snap(fish.x);
     const by = snap(fish.y);
-    const { chars, dx, dy, n } = run;
+    const { drawChars, dx, dy, n } = run;
     for (let i = 0; i < n; i++) {
-      ctx.fillText(chars[i], bx + dx[i], by + dy[i]);
+      ctx.fillText(drawChars[i], bx + dx[i], by + dy[i]);
     }
 
     // remember the footprint so the next frame can erase just this much

@@ -152,6 +152,12 @@ pub async fn overlay_show(app: AppHandle) -> Result<InnerRect, String> {
     }
 
     win.show().map_err(|e| e.to_string())?;
+    // showing a window can reflow it on some configurations: anchor it again
+    // right after the show, so the layer never sits at a wrong geometry
+    if let Some(rect) = system_work_area(&win) {
+        let _ = win.set_position(PhysicalPosition::new(rect.x, rect.y));
+        let _ = win.set_size(PhysicalSize::new(rect.width, rect.height));
+    }
     let _ = win.set_always_on_top(true);
     // Every show starts safe: input goes straight through to the app below.
     let _ = win.set_ignore_cursor_events(true);
@@ -186,6 +192,14 @@ pub fn tank_placement(app: AppHandle) -> Result<InnerRect, String> {
 #[tauri::command]
 pub fn cursor_pos() -> Option<(i32, i32)> {
     crate::win32::cursor_pos()
+}
+
+/// Colour of the composited desktop at a point, physical pixels.
+/// The tank samples this so a desk fish can pick a colour that stays visible
+/// on whatever wallpaper it is swimming over.
+#[tauri::command]
+pub fn screen_pixel(x: i32, y: i32) -> Option<(u8, u8, u8)> {
+    crate::win32::pixel_at(x, y)
 }
 
 /// true  -> mouse events pass through the overlay to the app below

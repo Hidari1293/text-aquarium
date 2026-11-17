@@ -8,8 +8,13 @@
 // nothing ever teleports or gets drawn twice.
 
 import { Bubbles } from "./bubbles.js";
-import { nearestPointInside, nearestPointOutside, rectHas } from "./coordinates.js";
-import { FISH_PROFILES, Fish } from "./fish.js";
+import {
+  adaptiveInk,
+  adaptRgb,
+  nearestPointInside,
+  rectHas,
+} from "./coordinates.js";
+import { Fish, fishProfile, fishProfileCustom } from "./fish.js";
 import { clamp } from "./fish-behavior.js";
 import { SeaweedBed } from "./seaweed.js";
 
@@ -25,6 +30,9 @@ const SPAWNS = [
   { fx: 0.64, fy: 0.62 },
   { fx: 0.46, fy: 0.22 },
 ];
+
+/** Shared "no cursor here" value; the worlds point at it by default. */
+const NO_CURSOR = { x: 0, y: 0, active: false, idle: 0 };
 
 export class Simulation {
   constructor() {
@@ -42,6 +50,26 @@ export class Simulation {
     this.separation = SEPARATION;
     this.time = 0;
 
+    /** Settings-owned world knobs, applied through the setters below. */
+    this.fishCount = 3;
+    this.fishSize = 15;
+    this.liveliness = 1;
+    /** A user-typed fish swimming next to the standard school. */
+    this.customGlyph = "";
+    this.customFacing = 1;
+    this.customFish = null;
+    /** While the net (hunt mode) is out, fish hold still for the lasso. */
+    this.hunting = false;
+    /** Test-only: freeze cursor updates (dev channel sets this). */
+    this.cursorLocked = false;
+
+    /** Where the mouse is, per space; lastMove drives the idle curiosity. */
+    this._cursor = {
+      tank: { x: 0, y: 0, active: false, idle: 0 },
+      desk: { x: 0, y: 0, active: false, idle: 0 },
+      lastMove: -Infinity,
+    };
+
     // scratch objects, reused every frame (no per-frame allocation)
     this._tankWorld = {
       bounds: this.bounds,
@@ -49,6 +77,12 @@ export class Simulation {
       separation: SEPARATION,
       fish: this.fish,
       hardBounds: true,
+      time: 0,
+      liveliness: 1,
+      cursor: NO_CURSOR,
+      dodgeRadius: 46,
+      curiousIdle: 4,
+      curiousRadius: 70,
     };
     this._deskWorld = {
       bounds: { w: 0, h: 0 },
@@ -56,6 +90,12 @@ export class Simulation {
       separation: SEPARATION + 24,
       fish: this.fish,
       hardBounds: true,
+      time: 0,
+      liveliness: 1,
+      cursor: NO_CURSOR,
+      dodgeRadius: 46,
+      curiousIdle: 4,
+      curiousRadius: 70,
     };
     this._frame = [];
   }
@@ -114,16 +154,20 @@ export class Simulation {
 
   spawn() {
     const { w, h } = this.bounds;
-    this.fish = FISH_PROFILES.map((profile, i) => {
+    const list = [];
+    for (let i = 0; i < this.fishCount; i++) {
       const spot = SPAWNS[i % SPAWNS.length];
-      return new Fish(profile, {
-        x: w * spot.fx,
-        y: h * spot.fy,
+      const fish = new Fish(fishProfile(i), {
+        x: i < SPAWNS.length ? w * spot.fx : 60 + Math.random() * (w - 120),
+        y: i < SPAWNS.length ? h * spot.fy : 60 + Math.random() * (h - 120),
         heading: Math.random() * Math.PI * 2,
       });
-    });
+      list.push(fish);
+    }
+    this.fish = list;
     this._tankWorld.fish = this.fish;
     this._deskWorld.fish = this.fish;
+    this.applyFishSize();
     for (const fish of this.fish) fish.clampToBounds(this.bounds);
   }
 
@@ -132,8 +176,152 @@ export class Simulation {
     for (const fish of this.fish) {
       const width = measure(fish.glyph);
       fish.halfW = width / 2 + 2;
-      fish.halfH = 8;
     }
+  }
+
+  /* ---------------------------------------------------------- settings */
+
+  /**
+   * Keep the standard school between 3 and 8: extras spawn in the tank.
+   * The custom fish swims *next to* the school and is never trimmed by this.
+   */
+  setFishCount(count) {
+    this.fishCount = clamp(Math.round(count), 3, 8);
+    const standard = () => this.fish.filter((f) => f !== this.customFish);
+    while (standard().length < this.fishCount) this.addFish();
+    while (standard().length > this.fishCount) {
+      // prefer thinning the tank; a visible desk fish is a worse surprise
+      let fish = standard().find((f) => f.space === "tank");
+      if (!fish) fish = standard()[standard().length - 1];
+      const index = this.fish.indexOf(fish);
+      if (index >= 0) this.fish.splice(index, 1);
+    }
+  }
+
+  addFish() {
+    const { w, h } = this.bounds;
+    const fish = new Fish(fishProfile(this.fish.length), {
+      x: 60 + Math.random() * Math.max(1, w - 120),
+      y: 60 + Math.random() * Math.max(1, h - 120),
+      heading: Math.random() * Math.PI * 2,
+    });
+    fish.halfH = this.fishSize * 0.55;
+    fish.waveAmp = fish.profile.bobAmp * 1.2 * (this.fishSize / 15);
+    fish.clampToBounds(this.bounds);
+    this.fish.push(fish);
+    // the boundary is open: the newcomer may join the desk world in a while
+    if (this.boundary === "open") fish.exitAt = this.time + 6 + Math.random() * 8;
+  }
+
+  /* ---------------------------------------------------- custom fish */
+
+  /**
+   * A fish the user typed themselves, swimming next to the standard school.
+   * Empty text removes it. `facing` = which way the text faces as written.
+   */
+  setCustomFish(glyph, facing) {
+    const text = String(glyph || "").trim().slice(0, 16);
+    const dir = facing >= 0 ? 1 : -1;
+    if (this.customGlyph === text && this.customFacing === dir && this.customFish) {
+      return;
+    }
+    this.customGlyph = text;
+    this.customFacing = dir;
+    if (this.customFish) {
+      const index = this.fish.indexOf(this.customFish);
+      if (index >= 0) this.fish.splice(index, 1);
+      this.customFish = null;
+    }
+    if (!text) return;
+
+    const { w, h } = this.bounds;
+    const fish = new Fish(fishProfileCustom(text, dir, this.fish.length), {
+      x: 60 + Math.random() * Math.max(1, w - 120),
+      y: 60 + Math.random() * Math.max(1, h - 120),
+      heading: Math.random() * Math.PI * 2,
+    });
+    fish.halfH = this.fishSize * 0.55;
+    fish.waveAmp = fish.profile.bobAmp * 1.2 * (this.fishSize / 15);
+    fish.clampToBounds(this.bounds);
+    this.fish.push(fish);
+    this.customFish = fish;
+    if (this.boundary === "open") fish.exitAt = this.time + 6 + Math.random() * 8;
+  }
+
+  /* -------------------------------------------------- background */
+
+  /**
+   * A sampled screen pixel behind a desk fish (luminance 0..255). The fish
+   * lerps towards it, so the colour adaptation glides instead of popping.
+   */
+  noteBackground(id, lum) {
+    const fish = this.customFish && this.customFish.id === id
+      ? this.customFish
+      : this.fish.find((f) => f.id === id);
+    if (!fish || fish.space !== "desk") return;
+    fish.bgLum += (lum - fish.bgLum) * 0.2;
+  }
+
+  setFishSize(size) {
+    this.fishSize = clamp(Math.round(size), 12, 22);
+    this.applyFishSize();
+    for (const fish of this.fish) fish.clampToBounds(this.bounds);
+    this.applyLiveliness();
+  }
+
+  applyFishSize() {
+    for (const fish of this.fish) {
+      fish.halfH = this.fishSize * 0.55;
+      fish.waveAmp = fish.profile.bobAmp * 1.2 * (this.fishSize / 15);
+    }
+  }
+
+  /** Liveliness = speed and curiosity in one knob. */
+  setLiveliness(value) {
+    this.liveliness = clamp(Number(value) || 1, 0.5, 2);
+    this.applyLiveliness();
+  }
+
+  applyLiveliness() {
+    const L = this.liveliness;
+    for (const world of [this._tankWorld, this._deskWorld]) {
+      world.liveliness = L;
+      world.dodgeRadius = (this.fishSize / 15) * 46;
+      world.curiousIdle = Math.max(1.5, 5.6 - 1.6 * L);
+      world.curiousRadius = clamp(70 + 60 * (L - 1), 40, 150);
+    }
+  }
+
+  /** The net is out (hunt mode): fish hold still for the lasso. */
+  setHunting(on) {
+    this.hunting = Boolean(on);
+  }
+
+  /* ------------------------------------------------------------ cursor */
+
+  /** Report the cursor in one space; movement refreshes the idle clock. */
+  setCursor(space, x, y) {
+    if (this.cursorLocked) return;
+    const c = this._cursor[space];
+    if (!c) return;
+    // first sight counts as movement, or the idle clock starts at -Infinity
+    if (!c.active || Math.hypot(c.x - x, c.y - y) > 0.6) {
+      this._cursor.lastMove = this.time;
+    }
+    c.x = x;
+    c.y = y;
+    c.active = true;
+  }
+
+  /** The cursor left this space; fish there stop reacting to it. */
+  clearCursor(space) {
+    const c = this._cursor[space];
+    if (c) c.active = false;
+  }
+
+  /** Dev channel only: keep manual cursor state from being overwritten. */
+  setCursorLock(locked) {
+    this.cursorLocked = Boolean(locked);
   }
 
   /* ---------------------------------------------------------- boundary */
@@ -144,6 +332,7 @@ export class Simulation {
 
     for (const fish of this.fish) {
       fish.stuckSince = 0;
+      fish.mood = "cruise";
       if (fish.state === "returning") {
         // change of plan: stay out
         fish.state = "outside";
@@ -151,7 +340,7 @@ export class Simulation {
         fish.colorTarget = 1;
         fish.returnAt = this.time + 14 + Math.random() * 14;
       } else if (fish.space === "tank" && fish.state === "inside") {
-        // staggered on purpose: nobody wants all three to bolt at once
+        // staggered on purpose: nobody wants the whole school to bolt at once
         fish.exitAt = this.time + 1.0 + Math.random() * 6.0;
       }
     }
@@ -164,14 +353,23 @@ export class Simulation {
     for (const fish of this.fish) {
       fish.exitAt = Infinity;
       fish.stuckSince = 0;
+      fish.mood = "cruise";
       if (fish.space === "tank") {
         if (fish.state === "crossing") {
+          // a fish already at the door may finish squeezing out and will come
+          // straight back — yanking it 40px into the tank would be a teleport
+          const padX = fish.halfW;
+          const nearEdge =
+            fish.x > this.bounds.w - padX ||
+            fish.x < padX ||
+            fish.y < fish.halfH ||
+            fish.y > this.bounds.h - fish.halfH;
+          if (nearEdge) continue;
           fish.state = "inside";
           fish.goal = null;
         }
         continue;
       }
-      if (fish.state === "dragging") continue;
       // staggered so they do not all pile onto the same point of the frame
       fish.state = "outside";
       fish.goal = null;
@@ -182,58 +380,38 @@ export class Simulation {
   /* ---------------------------------------------------------- handling */
 
   /**
-   * The mouse has taken hold of a fish. Only a fish that is already on the
-   * desktop can be picked up: one inside the tank belongs to the tank.
+   * The point a returning fish swims to. It must sit *deeper* inside the tank
+   * than the entry hand-over (which fires when the whole glyph is inside):
+   * a goal short of that line would park the fish 4px from the door until
+   * the rescue teleports it — the 487px jump the tests once caught.
    */
-  grabFish(id) {
-    const fish = this.fish.find((f) => f.id === id);
-    if (!fish || fish.space !== "desk") return false;
-    fish.state = "dragging";
-    fish.goal = null;
-    fish.cruise = null;
-    fish.dragAt = this.time;
-    return true;
-  }
-
-  /** Follow the hand. Position only — the tank still owns the fish. */
-  dragFish(id, x, y) {
-    const fish = this.fish.find((f) => f.id === id);
-    if (!fish || fish.state !== "dragging") return;
-    const nx = clamp(x, 10, this.desk.w - 10);
-    const ny = clamp(y, 10, this.desk.h - 10);
-    if (nx > fish.x + 0.3) fish.facing = 1;
-    else if (nx < fish.x - 0.3) fish.facing = -1;
-    fish.x = nx;
-    fish.y = ny;
-    fish.dragAt = this.time;
+  homeGoal(fish) {
+    return nearestPointInside(this.tankRect, fish.x, fish.y, fish.halfW + 8);
   }
 
   /**
-   * Let go. Dropped over the tank it becomes a tank fish again (black at
-   * once); dropped anywhere else it simply carries on swimming.
+   * The net: a box dragged on the desktop. Every free-swimming desk fish
+   * inside it starts swimming home — no teleporting, the journey is theirs.
+   * Returns how many were caught.
    */
-  dropFish(id, x, y) {
-    const fish = this.fish.find((f) => f.id === id);
-    if (!fish || fish.state !== "dragging") return null;
-    fish.dragAt = 0;
-
-    if (rectHas(this.tankRect, x, y)) {
-      this.enterTank(fish, x, y);
-      return "tank";
+  lassoFish(x1, y1, x2, y2) {
+    const rect = {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      w: Math.abs(x2 - x1),
+      h: Math.abs(y2 - y1),
+    };
+    let caught = 0;
+    for (const fish of this.fish) {
+      if (fish.space !== "desk" || fish.state !== "outside") continue;
+      if (!rectHas(rect, fish.x, fish.y)) continue;
+      fish.state = "returning";
+      fish.goal = this.homeGoal(fish);
+      fish.mood = "cruise";
+      fish.stuckSince = 0;
+      caught++;
     }
-
-    fish.state = this.boundary === "closed" ? "returning" : "outside";
-    fish.goal =
-      this.boundary === "closed"
-        ? nearestPointInside(this.tankRect, fish.x, fish.y, 42)
-        : null;
-    fish.cruise = null;
-    fish.colorTarget = 1;
-    if (this.boundary === "open") {
-      // a fish that was just put down should not turn straight back
-      fish.returnAt = this.time + 18 + Math.random() * 12;
-    }
-    return "desk";
+    return caught;
   }
 
   /** Desk point -> tank fish, with the colour already back to ink. */
@@ -246,6 +424,7 @@ export class Simulation {
     fish.state = "inside";
     fish.goal = null;
     fish.cruise = null;
+    fish.mood = "cruise";
     fish.colorMix = 0;
     fish.colorTarget = 0;
     fish.returnAt = Infinity;
@@ -264,16 +443,23 @@ export class Simulation {
 
     const tank = this._tankWorld;
     const desk = this._deskWorld;
+    tank.time = this.time;
+    desk.time = this.time;
+
+    // cursor state feeds the fish moods; "idle" is what makes them curious
+    const idle = this.time - this._cursor.lastMove;
+    this._cursor.tank.idle = idle;
+    this._cursor.desk.idle = idle;
+    const cursorLive = !this.hunting; // the net is out: hold still for it
+    tank.cursor = cursorLive ? this._cursor.tank : NO_CURSOR;
+    desk.cursor = cursorLive ? this._cursor.desk : NO_CURSOR;
 
     for (const fish of this.fish) {
-      // a held fish whose hand went away (the layer died, the mouse left)
-      // must not stay frozen in mid-air for ever
-      if (fish.state === "dragging" && this.time - fish.dragAt > 2.5) {
-        this.dropFish(fish.id, fish.x, fish.y);
-      }
       this.decide(fish);
       if (fish.space === "tank") {
-        tank.hardBounds = this.boundary === "closed";
+        // a fish finishing an interrupted exit must reach the edge, or the
+        // hard clamp would bounce it back before resolve() can hand it over
+        tank.hardBounds = this.boundary === "closed" && fish.state !== "crossing";
         fish.update(dt, tank);
       } else {
         desk.hardBounds = true;
@@ -285,8 +471,6 @@ export class Simulation {
 
   /** Timed intentions: leave the tank, come back home. */
   decide(fish) {
-    if (fish.state === "dragging") return;
-
     if (this.boundary === "open") {
       if (
         fish.space === "tank" &&
@@ -294,33 +478,30 @@ export class Simulation {
         this.time >= fish.exitAt
       ) {
         fish.state = "crossing";
-        fish.goal = nearestPointOutside(
-          { x: 0, y: 0, w: this.bounds.w, h: this.bounds.h },
-          fish.x,
-          fish.y,
-          44
-        );
+        fish.mood = "cruise";
+        // the fish leaves through the side it is already swimming towards:
+        // an exit over the top or the bottom reads as the tank leaking
+        fish.goal = {
+          x: fish.facing >= 0 ? this.bounds.w + 30 : -30,
+          y: clamp(fish.y, 34, Math.max(34, this.bounds.h - 34)),
+        };
       }
-      if (
-        fish.space === "desk" &&
-        fish.state === "outside" &&
-        this.time >= fish.returnAt
-      ) {
-        fish.state = "returning";
-        fish.goal = nearestPointInside(this.tankRect, fish.x, fish.y, 42);
-      }
+      // a fish that made it out stays out: the only ways home are the net
+      // or closing the boundary (a voluntary return once took fish to a
+      // clamped corner when the tank window was minimised — see v1.2.1 log)
     } else if (
       fish.space === "desk" &&
       fish.state === "outside" &&
       this.time >= fish.returnAt
     ) {
       fish.state = "returning";
-      fish.goal = nearestPointInside(this.tankRect, fish.x, fish.y, 42);
+      fish.mood = "cruise";
+      fish.goal = this.homeGoal(fish);
     }
 
     if (fish.state === "returning") {
       // keep aiming at the tank even if the window is being dragged around
-      const home = nearestPointInside(this.tankRect, fish.x, fish.y, 42);
+      const home = this.homeGoal(fish);
       // a tank hanging off the screen edge must not pull a fish off-screen
       fish.goal = {
         x: Math.min(Math.max(home.x, 24), this.desk.w - 24),
@@ -374,6 +555,7 @@ export class Simulation {
     fish.state = "inside";
     fish.goal = null;
     fish.cruise = null;
+    fish.mood = "cruise";
     fish.colorMix = 0;
     fish.colorTarget = 0;
     fish.returnAt = Infinity;
@@ -386,25 +568,43 @@ export class Simulation {
   /** Space hand-over. Called right after the fish moved. */
   resolve(fish) {
     if (fish.space === "tank") {
-      if (
-        this.boundary === "open" &&
-        fish.state === "crossing" &&
-        !rectHas({ x: 0, y: 0, w: this.bounds.w, h: this.bounds.h }, fish.x, fish.y)
-      ) {
+      // the hand-over happens the moment the *leading end* of the fish clears
+      // the border, not when its centre does: the desktop layer then draws
+      // the whole glyph (it sits on top of the tank), so the fish slides out
+      // in one piece instead of being clipped at the border and popping out.
+      const leadingOut =
+        fish.facing >= 0
+          ? fish.x > this.bounds.w - fish.halfW
+          : fish.x < fish.halfW;
+      if (fish.state === "crossing" && leadingOut) {
         fish.x += this.tankRect.x;
         fish.y += this.tankRect.y;
         fish.space = "desk";
-        fish.state = "outside";
         fish.goal = null;
-        fish.colorTarget = 1;
-        fish.returnAt = this.time + 14 + Math.random() * 16;
+        fish.mood = "cruise";
+        if (this.boundary === "open") {
+          fish.state = "outside";
+          fish.colorTarget = 1;
+          fish.returnAt = Infinity; // it stays out until netted or called home
+        } else {
+          // the boundary closed while this fish was already at the door: it
+          // finishes the squeeze-out and turns straight back, no teleport
+          fish.state = "returning";
+          fish.goal = this.homeGoal(fish);
+          fish.colorTarget = 0;
+        }
       }
       return;
     }
 
-    if (fish.state === "returning" && rectHas(this.tankRect, fish.x, fish.y)) {
-      // the fish is already inside the tank rect: hand it over in place, so
-      // there is not a single frame of difference between the two canvases
+    if (
+      fish.state === "returning" &&
+      rectHas(this.tankRect, fish.x, fish.y, -fish.halfW - 2)
+    ) {
+      // the fish is fully inside the tank rect (the whole glyph cleared the
+      // frame): hand it over in place, so there is not a single frame of
+      // difference between the two canvases — and the entry clamp that keeps
+      // glyphs off the border is already satisfied, so no snap either
       this.enterTank(fish, fish.x, fish.y);
     }
   }
@@ -426,11 +626,15 @@ export class Simulation {
       out.push({
         id: fish.id,
         g: fish.glyph,
+        // which way the text faces as written (custom fish bring their own)
+        cf: fish.canonFacing,
         x: Math.round(fish.x * 10) / 10,
         y: Math.round(fish.y * 10) / 10,
         f: fish.facing,
         m: Math.round(fish.colorMix * 100) / 100,
-        c: fish.oceanColor,
+        // colours adapt to the background the fish is swimming over
+        c: adaptRgb(fish.oceanColor, fish.bgLum),
+        i: adaptiveInk(fish.bgLum),
         // the body shape travels with the fish: same ripple, same lean
         w: Math.round(fish.wavePhase * 100) / 100,
         p: Math.round(fish.pitch * 100) / 100,

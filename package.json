@@ -1,7 +1,7 @@
 {
   "name": "text-aquarium",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "Text Aquarium - a tiny text-character fish tank that can leak onto your desktop",
   "scripts": {
