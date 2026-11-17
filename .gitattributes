@@ -1,0 +1,9 @@
+# 统一换行符，避免 Windows / macOS 之间来回改整份文件
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.woff2 binary

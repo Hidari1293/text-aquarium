@@ -1,0 +1,15 @@
+{
+  "name": "text-aquarium",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Text Aquarium - a tiny text-character fish tank that can leak onto your desktop",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

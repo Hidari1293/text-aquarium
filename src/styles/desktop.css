@@ -1,0 +1,35 @@
+/* Desktop overlay: nothing but characters on top of whatever is behind. */
+
+html,
+body {
+  background: transparent;
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body {
+  /* Nothing here is clickable unless catching mode is on; the OS-level
+     click-through flag is the real guard, this is the second one. */
+  pointer-events: none;
+}
+
+/* Catching mode: the layer may receive pointer events, but only while the
+   cursor is close enough to a fish for the OS flag to be flipped. */
+body.hunting {
+  pointer-events: auto;
+}
+
+body.can-grab {
+  cursor: grab;
+}
+
+canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}

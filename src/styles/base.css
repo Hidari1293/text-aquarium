@@ -1,0 +1,72 @@
+/* Shared foundation: white paper, black ink, monospace only. */
+
+:root {
+  --ink: #111111;
+  --paper: #ffffff;
+  --ink-soft: rgba(17, 17, 17, 0.45);
+  --ink-faint: rgba(17, 17, 17, 0.15);
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono",
+    "DejaVu Sans Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  font-size: 11px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  padding: 2px 9px;
+  line-height: 16px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background-color 90ms linear, color 90ms linear, opacity 90ms linear;
+}
+
+button:hover:not(:disabled) {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+button:active:not(:disabled) {
+  opacity: 0.75;
+}
+
+button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+button:disabled {
+  border-color: var(--ink-faint);
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 1px dotted var(--ink);
+  outline-offset: 2px;
+}

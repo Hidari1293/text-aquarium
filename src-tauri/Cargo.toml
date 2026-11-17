@@ -1,0 +1,31 @@
+[package]
+name = "text-aquarium"
+version = "1.0.0"
+description = "Text Aquarium - a tiny text-character fish tank that can leak onto your desktop"
+authors = ["Text Aquarium"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "text_aquarium_lib"
+# Windows-only: no staticlib/cdylib needed (those are for mobile), and
+# one output instead of three keeps the debug link down to seconds.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.dev]
+# no line tables in a binary we only ever run, never step through in a debugger
+debug = 0
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

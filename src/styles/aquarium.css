@@ -1,0 +1,120 @@
+/* Tank window layout: hairline frame, lots of white space. */
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 8px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  height: 22px;
+  flex: 0 0 auto;
+}
+
+.brand {
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.controls {
+  display: flex;
+  gap: 6px;
+}
+
+.tank {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid var(--ink);
+  overflow: hidden;
+}
+
+/* Boundary open: the frame is still a frame, just a broken one. */
+.tank.is-open {
+  border-style: dashed;
+}
+
+.tank canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  height: 14px;
+  font-size: 10px;
+  color: var(--ink-soft);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* ---- settings panel ------------------------------------------------ */
+
+.panel {
+  position: fixed;
+  top: 44px;
+  right: 14px;
+  width: 236px;
+  padding: 10px 12px 12px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  z-index: 30;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+
+.row input[type="checkbox"] {
+  accent-color: #111111;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+}
+
+.panel .hint {
+  margin: 8px 0 0;
+  font-size: 10px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.panel pre {
+  margin: 8px 0 0;
+  max-height: 150px;
+  overflow: auto;
+  font-size: 10px;
+  line-height: 1.45;
+  color: #111111;
+  white-space: pre-wrap;
+  border-top: 1px solid var(--ink-faint);
+  padding-top: 8px;
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Text Aquarium</title>
+    <link rel="stylesheet" href="./styles/base.css" />
+    <link rel="stylesheet" href="./styles/aquarium.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="bar">
+        <div class="brand">Text Aquarium</div>
+        <div class="controls">
+          <button
+            id="btn-boundary"
+            type="button"
+            aria-pressed="false"
+            title="打开边界，让小鱼游到桌面上"
+          >
+            打开边界
+          </button>
+          <button id="btn-pause" type="button" aria-pressed="false">暂停</button>
+          <button
+            id="btn-hunt"
+            type="button"
+            aria-pressed="false"
+            title="开启后，鼠标靠近小鱼才接住点击"
+            disabled
+          >
+            捞鱼
+          </button>
+          <button id="btn-settings" type="button" aria-pressed="false">设置</button>
+        </div>
+      </header>
+
+      <main class="tank" id="tank">
+        <canvas id="scene"></canvas>
+      </main>
+
+      <footer class="status">
+        <span id="status-mode">鱼缸模式 · 边界关闭</span>
+        <span id="status-perf">— fps</span>
+      </footer>
+    </div>
+
+    <section class="panel" id="settings-panel" hidden>
+      <h2>设置</h2>
+      <div class="row">
+        <label for="set-seaweed">海草</label>
+        <input id="set-seaweed" type="checkbox" />
+      </div>
+      <div class="row">
+        <label for="set-bubbles">气泡</label>
+        <input id="set-bubbles" type="checkbox" />
+      </div>
+      <div class="row">
+        <label for="set-fps" id="set-fps-label">高帧率 60</label>
+        <input id="set-fps" type="checkbox" />
+      </div>
+      <div class="row">
+        <label>透明层自检</label>
+        <button id="btn-tech" type="button">运行</button>
+      </div>
+      <pre id="tech-out" hidden></pre>
+      <p class="hint">
+        空格暂停 · Esc 关闭面板。打开边界后小鱼会游到桌面上：默认不挡鼠标，开启捞鱼模式后只有靠近小鱼的地方才接住点击。
+      </p>
+    </section>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>
